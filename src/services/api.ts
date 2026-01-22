@@ -22,6 +22,7 @@ import type {
   ProductCreateRequest,
   AdminProductStockRow,
   StockUpdateRequest,
+  ProductReorderRequest,
   ShippingPolicy,
   ShippingPolicyCreateRequest,
   ShippingPolicyResponse,
@@ -118,7 +119,17 @@ class ApiService {
         const isProduct500 = error.config?.url?.includes('/products/') && 
                              error.response?.status === 500;
         
-        if (!isCustomerProfile404 && !isPaymentByOrder404 && !isProduct404 && !isProduct500) {
+        // 500 에러는 상세 정보를 포함하여 로깅
+        if (error.response?.status === 500) {
+          console.error('[API Error] 500 Internal Server Error', {
+            method: error.config?.method?.toUpperCase(),
+            url: error.config?.url,
+            status: error.response?.status,
+            statusText: error.response?.statusText,
+            data: error.response?.data,
+            message: error.response?.data?.message || error.message,
+          });
+        } else if (!isCustomerProfile404 && !isPaymentByOrder404 && !isProduct404 && !isProduct500) {
           console.error('[API Error]', error.config?.method?.toUpperCase(), error.config?.url, error.response?.status, error.response?.data || error.message);
         }
         return Promise.reject(error);
@@ -552,13 +563,58 @@ class ApiService {
     productId: number,
     data: { name?: string; price?: number; category?: string; taxType?: string; active?: boolean; purchasePrice?: number }
   ): Promise<JsonBody<void>> {
-    const response = await this.client.patch(`/api/v1/admin/products/${productId}`, data);
+    console.log('[API] ========== updateProduct 시작 ==========');
+    console.log('[API] productId:', productId);
+    console.log('[API] 요청 데이터:', JSON.stringify(data, null, 2));
+    console.log('[API] 요청 URL:', `/api/v1/admin/products/${productId}`);
+    console.log('[API] 요청 메서드: PATCH');
+    
+    try {
+      const response = await this.client.patch(`/api/v1/admin/products/${productId}`, data);
+      console.log('[API] ========== updateProduct 성공 ==========');
+      console.log('[API] 응답 상태:', response.status);
+      console.log('[API] 응답 데이터:', JSON.stringify(response.data, null, 2));
+      return response.data;
+    } catch (error: any) {
+      console.error('[API] ========== updateProduct 실패 ==========');
+      console.error('[API] 에러 상태:', error.response?.status);
+      console.error('[API] 에러 상태 텍스트:', error.response?.statusText);
+      console.error('[API] 에러 응답 데이터:', JSON.stringify(error.response?.data, null, 2));
+      console.error('[API] 에러 메시지:', error.message);
+      throw error;
+    }
+  }
+
+  async reorderProducts(data: ProductReorderRequest): Promise<JsonBody<void>> {
+    console.log('[API] reorderProducts 요청:', JSON.stringify(data, null, 2));
+    const response = await this.client.put('/api/v1/admin/products/reorder', data);
+    console.log('[API] reorderProducts 응답:', response.data);
     return response.data;
   }
 
   // Policy APIs - Shipping
   async getShippingPolicies(): Promise<JsonBody<ShippingPolicyResponse[]>> {
     const response = await this.client.get('/api/v1/admin/policies/shipping');
+    console.log('[DEBUG API] getShippingPolicies 원본 응답:', JSON.stringify(response.data, null, 2));
+    if (response.data?.data) {
+      response.data.data.forEach((policy: any, pIdx: number) => {
+        console.log(`[DEBUG API] 정책[${pIdx}] ${policy.name}:`, policy);
+        if (policy.rules) {
+          policy.rules.forEach((rule: any, rIdx: number) => {
+            console.log(`[DEBUG API]   룰[${rIdx}]:`, {
+              id: rule.id,
+              type: rule.type,
+              label: rule.label,
+              zipPrefix: rule.zipPrefix,
+              zipPrefixType: typeof rule.zipPrefix,
+              zipPrefixLength: rule.zipPrefix?.length,
+              fee: rule.fee,
+              freeOverAmount: rule.freeOverAmount,
+            });
+          });
+        }
+      });
+    }
     return response.data;
   }
 
@@ -716,6 +772,55 @@ class ApiService {
         responseData: error.response?.data,
         responseHeaders: error.response?.headers,
       });
+      
+      // 서버 응답 상세 정보 출력
+      if (error.response?.data) {
+        const responseData = error.response.data;
+        
+        // 전체 응답 데이터를 JSON으로 출력
+        console.error('[createDiscountRule] 서버 응답 전체 (JSON):', JSON.stringify(responseData, null, 2));
+        console.error('[createDiscountRule] 서버 응답 상세:', {
+          status: error.response.status,
+          statusText: error.response.statusText,
+          data: responseData,
+          dataType: typeof responseData,
+          dataKeys: responseData ? Object.keys(responseData) : [],
+          message: responseData.message,
+          error: responseData.error,
+          exception: responseData.exception,
+          path: responseData.path,
+          timestamp: responseData.timestamp,
+        });
+        
+        // 응답 데이터의 모든 속성 출력
+        if (responseData && typeof responseData === 'object') {
+          console.error('[createDiscountRule] 응답 데이터 속성:', Object.keys(responseData));
+          for (const key in responseData) {
+            if (responseData.hasOwnProperty(key)) {
+              console.error(`[createDiscountRule] ${key}:`, responseData[key]);
+            }
+          }
+        }
+        
+        // 스택 트레이스가 있으면 출력
+        if (responseData.trace) {
+          console.error('[createDiscountRule] 스택 트레이스 (일부):', responseData.trace.substring(0, 1000));
+        }
+        
+        // 필드별 에러가 있으면 출력
+        if (responseData.errors) {
+          console.error('[createDiscountRule] 필드별 에러:', responseData.errors);
+        }
+      } else {
+        console.error('[createDiscountRule] 네트워크 에러 또는 응답 없음');
+        console.error('[createDiscountRule] 에러 메시지:', error.message);
+      }
+      
+      // 응답 헤더도 확인
+      if (error.response?.headers) {
+        console.error('[createDiscountRule] 응답 헤더:', error.response.headers);
+      }
+      
       console.error('[createDiscountRule] 전체 에러 객체:', error);
       console.error('[createDiscountRule] ===============================');
       throw error;
@@ -726,8 +831,82 @@ class ApiService {
     ruleId: number,
     data: DiscountRuleUpdateRequest
   ): Promise<JsonBody<DiscountRuleResponse>> {
-    const response = await this.client.put(`/api/v1/admin/policies/rules/${ruleId}`, data);
-    return response.data;
+    console.log('[updateDiscountRule] ========== 요청 시작 ==========');
+    console.log('[updateDiscountRule] 요청 URL:', `/api/v1/admin/policies/rules/${ruleId}`);
+    console.log('[updateDiscountRule] 룰 ID:', ruleId);
+    console.log('[updateDiscountRule] 요청 데이터 (JSON):', JSON.stringify(data, null, 2));
+    console.log('[updateDiscountRule] 요청 데이터 (객체):', data);
+    
+    try {
+      const response = await this.client.put(`/api/v1/admin/policies/rules/${ruleId}`, data);
+      console.log('[updateDiscountRule] 응답 성공:', response.data);
+      console.log('[updateDiscountRule] ========== 요청 완료 ==========');
+      return response.data;
+    } catch (error: any) {
+      console.error('[updateDiscountRule] ========== 에러 발생 ==========');
+      console.error('[updateDiscountRule] 요청 URL:', `/api/v1/admin/policies/rules/${ruleId}`);
+      console.error('[updateDiscountRule] 룰 ID:', ruleId);
+      console.error('[updateDiscountRule] 요청 데이터 (JSON):', JSON.stringify(data, null, 2));
+      console.error('[updateDiscountRule] 요청 데이터 (객체):', data);
+      console.error('[updateDiscountRule] 에러 상세:', {
+        status: error.response?.status,
+        statusText: error.response?.statusText,
+        responseData: error.response?.data,
+        responseHeaders: error.response?.headers,
+      });
+      
+      // 서버 응답 상세 정보 출력
+      if (error.response?.data) {
+        const responseData = error.response.data;
+        
+        // 전체 응답 데이터를 JSON으로 출력
+        console.error('[updateDiscountRule] 서버 응답 전체 (JSON):', JSON.stringify(responseData, null, 2));
+        console.error('[updateDiscountRule] 서버 응답 상세:', {
+          status: error.response.status,
+          statusText: error.response.statusText,
+          data: responseData,
+          dataType: typeof responseData,
+          dataKeys: responseData ? Object.keys(responseData) : [],
+          message: responseData.message,
+          error: responseData.error,
+          exception: responseData.exception,
+          path: responseData.path,
+          timestamp: responseData.timestamp,
+        });
+        
+        // 응답 데이터의 모든 속성 출력
+        if (responseData && typeof responseData === 'object') {
+          console.error('[updateDiscountRule] 응답 데이터 속성:', Object.keys(responseData));
+          for (const key in responseData) {
+            if (responseData.hasOwnProperty(key)) {
+              console.error(`[updateDiscountRule] ${key}:`, responseData[key]);
+            }
+          }
+        }
+        
+        // 스택 트레이스가 있으면 출력
+        if (responseData.trace) {
+          console.error('[updateDiscountRule] 스택 트레이스 (일부):', responseData.trace.substring(0, 1000));
+        }
+        
+        // 필드별 에러가 있으면 출력
+        if (responseData.errors) {
+          console.error('[updateDiscountRule] 필드별 에러:', responseData.errors);
+        }
+      } else {
+        console.error('[updateDiscountRule] 네트워크 에러 또는 응답 없음');
+        console.error('[updateDiscountRule] 에러 메시지:', error.message);
+      }
+      
+      // 응답 헤더도 확인
+      if (error.response?.headers) {
+        console.error('[updateDiscountRule] 응답 헤더:', error.response.headers);
+      }
+      
+      console.error('[updateDiscountRule] 전체 에러 객체:', error);
+      console.error('[updateDiscountRule] ===============================');
+      throw error;
+    }
   }
 
   // Admin - Review Match APIs

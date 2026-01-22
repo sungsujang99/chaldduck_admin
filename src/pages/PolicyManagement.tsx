@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Card,
-  Tabs,
   Button,
   Space,
   Typography,
@@ -25,10 +24,6 @@ import type {
   ShippingPolicyResponse,
   ShippingRuleCreateRequest,
   ShippingRuleResponse,
-  DiscountPolicyCreateRequest,
-  DiscountPolicyResponse,
-  DiscountRuleCreateRequest,
-  DiscountRuleResponse,
 } from '@/types/api'
 
 const { Title } = Typography
@@ -38,24 +33,23 @@ const PolicyManagement = () => {
   const queryClient = useQueryClient()
   const [shippingPolicyForm] = Form.useForm()
   const [shippingRuleForm] = Form.useForm()
-  const [discountPolicyForm] = Form.useForm()
-  const [discountRuleForm] = Form.useForm()
-  const [activeTab, setActiveTab] = useState('shipping')
   const [isShippingPolicyModalOpen, setIsShippingPolicyModalOpen] = useState(false)
   const [isShippingRuleModalOpen, setIsShippingRuleModalOpen] = useState(false)
   const [selectedShippingPolicyId, setSelectedShippingPolicyId] = useState<number | null>(null)
-  const [isDiscountPolicyModalOpen, setIsDiscountPolicyModalOpen] = useState(false)
-  const [isDiscountRuleModalOpen, setIsDiscountRuleModalOpen] = useState(false)
-  const [selectedDiscountPolicyId, setSelectedDiscountPolicyId] = useState<number | null>(null)
   const [editingFreeOverAmount, setEditingFreeOverAmount] = useState<{ ruleId: number; policyId: number } | null>(null)
   const [editingFreeOverAmountValue, setEditingFreeOverAmountValue] = useState<string>('')
   
   // 우편번호 -> 지역명 매핑 (주요 우편번호만 표시)
   const getRegionFromZipCode = (zipCode?: string): string => {
-    if (!zipCode) return '-'
+    console.log('[DEBUG] getRegionFromZipCode 호출:', { zipCode, type: typeof zipCode })
+    if (!zipCode) {
+      console.log('[DEBUG] getRegionFromZipCode: zipCode가 falsy, "-" 반환')
+      return '-'
+    }
     
     // 앞 3자리 기준으로 대략적인 지역 표시
     const prefix = zipCode.substring(0, 3)
+    console.log('[DEBUG] getRegionFromZipCode prefix:', prefix)
     const zipPrefixMap: Record<string, string> = {
       '010': '서울 도봉구',
       '011': '서울 노원구',
@@ -171,20 +165,37 @@ const PolicyManagement = () => {
       '707': '대구 달성군',
     }
     
-    return zipPrefixMap[prefix] || `우편번호 ${zipCode}`
+    const result = zipPrefixMap[prefix] || `우편번호 ${zipCode}`
+    console.log('[DEBUG] getRegionFromZipCode 결과:', { prefix, result, found: !!zipPrefixMap[prefix] })
+    return result
   }
 
   // Shipping Policies Query
   const { data: shippingPoliciesData, isLoading: isLoadingShippingPolicies, refetch: refetchShippingPolicies } = useQuery({
     queryKey: ['shippingPolicies'],
-    queryFn: () => apiService.getShippingPolicies(),
-    retry: false,
-  })
-
-  // Discount Policies Query
-  const { data: discountPoliciesData, isLoading: isLoadingDiscountPolicies, refetch: refetchDiscountPolicies } = useQuery({
-    queryKey: ['discountPolicies'],
-    queryFn: () => apiService.getDiscountPolicies(),
+    queryFn: async () => {
+      const result = await apiService.getShippingPolicies()
+      console.log('[DEBUG] 배송비 정책 전체 응답:', JSON.stringify(result, null, 2))
+      if (result?.data) {
+        result.data.forEach((policy, pIdx) => {
+          console.log(`[DEBUG] 정책[${pIdx}]:`, policy.name, policy.id)
+          if (policy.rules) {
+            policy.rules.forEach((rule, rIdx) => {
+              console.log(`[DEBUG]   룰[${rIdx}]:`, {
+                id: rule.id,
+                type: rule.type,
+                label: rule.label,
+                zipPrefix: rule.zipPrefix,
+                zipPrefixType: typeof rule.zipPrefix,
+                fee: rule.fee,
+                freeOverAmount: rule.freeOverAmount,
+              })
+            })
+          }
+        })
+      }
+      return result
+    },
     retry: false,
   })
 
@@ -249,35 +260,6 @@ const PolicyManagement = () => {
     },
   })
 
-  // Discount Policy Mutation
-  const createDiscountPolicyMutation = useMutation({
-    mutationFn: (data: DiscountPolicyCreateRequest) => apiService.createDiscountPolicy(data),
-    onSuccess: () => {
-      message.success('할인 정책이 생성되었습니다.')
-      setIsDiscountPolicyModalOpen(false)
-      discountPolicyForm.resetFields()
-      refetchDiscountPolicies()
-    },
-    onError: (error: any) => {
-      message.error(error.response?.data?.message || '할인 정책 생성에 실패했습니다.')
-    },
-  })
-
-  // Discount Rule Mutation
-  const createDiscountRuleMutation = useMutation({
-    mutationFn: (data: DiscountRuleCreateRequest) => apiService.createDiscountRule(data),
-    onSuccess: () => {
-      message.success('할인 룰이 생성되었습니다.')
-      setIsDiscountRuleModalOpen(false)
-      setSelectedDiscountPolicyId(null)
-      discountRuleForm.resetFields()
-      refetchDiscountPolicies()
-    },
-    onError: (error: any) => {
-      message.error(error.response?.data?.message || '할인 룰 생성에 실패했습니다.')
-    },
-  })
-
   // Delete Mutations
   const deleteShippingPolicyMutation = useMutation({
     mutationFn: (policyId: number) => apiService.deleteShippingPolicy(policyId),
@@ -301,28 +283,6 @@ const PolicyManagement = () => {
     },
   })
 
-  const deleteDiscountPolicyMutation = useMutation({
-    mutationFn: (policyId: number) => apiService.deleteDiscountPolicy(policyId),
-    onSuccess: () => {
-      message.success('할인 정책이 삭제되었습니다.')
-      refetchDiscountPolicies()
-    },
-    onError: (error: any) => {
-      message.error(error.response?.data?.message || '할인 정책 삭제에 실패했습니다.')
-    },
-  })
-
-  const deleteDiscountRuleMutation = useMutation({
-    mutationFn: (ruleId: number) => apiService.deleteDiscountRule(ruleId),
-    onSuccess: () => {
-      message.success('할인 룰이 삭제되었습니다.')
-      refetchDiscountPolicies()
-    },
-    onError: (error: any) => {
-      message.error(error.response?.data?.message || '할인 룰 삭제에 실패했습니다.')
-    },
-  })
-
   const handleDeleteShippingPolicy = (policyId: number) => {
     Modal.confirm({
       title: '배송비 정책 삭제',
@@ -339,26 +299,6 @@ const PolicyManagement = () => {
       content: '정말 삭제하시겠습니까?',
       onOk: () => {
         deleteShippingRuleMutation.mutate(ruleId)
-      },
-    })
-  }
-
-  const handleDeleteDiscountPolicy = (policyId: number) => {
-    Modal.confirm({
-      title: '할인 정책 삭제',
-      content: '정책에 속한 룰도 함께 삭제됩니다. 정말 삭제하시겠습니까?',
-      onOk: () => {
-        deleteDiscountPolicyMutation.mutate(policyId)
-      },
-    })
-  }
-
-  const handleDeleteDiscountRule = (ruleId: number) => {
-    Modal.confirm({
-      title: '할인 룰 삭제',
-      content: '정말 삭제하시겠습니까?',
-      onOk: () => {
-        deleteDiscountRuleMutation.mutate(ruleId)
       },
     })
   }
@@ -408,6 +348,11 @@ const PolicyManagement = () => {
       
       if (values.type === 'ZIP_PREFIX_FEE') {
         // ZIP_PREFIX_FEE 타입은 zipPrefix(전체 우편번호)와 fee가 필요
+        console.log('[DEBUG] ZIP_PREFIX_FEE 타입 처리:', {
+          'values.zipPrefix': values.zipPrefix,
+          'values.zipPrefix type': typeof values.zipPrefix,
+          'values.fee': values.fee,
+        })
         if (!values.zipPrefix || values.zipPrefix.trim() === '') {
           message.error('우편번호를 입력해주세요.')
           return
@@ -418,6 +363,7 @@ const PolicyManagement = () => {
         }
         zipPrefix = values.zipPrefix.trim()
         fee = Number(values.fee)
+        console.log('[DEBUG] ZIP_PREFIX_FEE 처리 결과:', { zipPrefix, fee })
       } else if (values.type === 'FREE_OVER_AMOUNT') {
         // FREE_OVER_AMOUNT 타입은 freeOverAmount가 필요
         if (values.freeOverAmount === undefined || values.freeOverAmount === null || values.freeOverAmount < 0) {
@@ -435,6 +381,7 @@ const PolicyManagement = () => {
       }
       
       // 최종 데이터 생성 (모든 필드 포함, 필수가 아니면 0)
+      console.log('[DEBUG] 최종 데이터 생성 전:', { zipPrefix, zipPrefixType: typeof zipPrefix, fee, freeOverAmount })
       const data: ShippingRuleCreateRequest = {
         policyId: policyId,
         type: values.type,
@@ -446,6 +393,12 @@ const PolicyManagement = () => {
         fee: fee !== undefined ? fee : 0,
         freeOverAmount: freeOverAmount !== undefined ? freeOverAmount : 0,
       }
+      console.log('[DEBUG] 최종 데이터 생성 후:', { 
+        'data.zipPrefix': data.zipPrefix, 
+        'data.zipPrefix type': typeof data.zipPrefix,
+        'zipPrefix in data': 'zipPrefix' in data,
+        fullData: data 
+      })
       
       // 최종 데이터 검증
       console.log('[PolicyManagement] 배송비 룰 생성 최종 요청 데이터:', JSON.stringify(data, null, 2))
@@ -460,133 +413,6 @@ const PolicyManagement = () => {
       })
       
       createShippingRuleMutation.mutate(data)
-    }).catch((error) => {
-      console.error('[PolicyManagement] 폼 검증 에러:', error)
-      message.error('입력값을 확인해주세요.')
-    })
-  }
-
-  const handleDiscountPolicySubmit = () => {
-    discountPolicyForm.validateFields().then((values) => {
-      const [startAt, endAt] = values.dateRange as [Dayjs, Dayjs]
-      // API 스펙: date-time 형식 (ISO 8601)
-      // 예시: "2026-01-01T00:00:00"
-      // 서버가 타임존 없이 기대할 수 있으므로 로컬 시간대 형식으로 시도
-      const requestData = {
-        name: values.name,
-        startAt: startAt.format('YYYY-MM-DDTHH:mm:ss'),
-        endAt: endAt.format('YYYY-MM-DDTHH:mm:ss'),
-        active: values.active ?? true,
-      }
-      console.log('[PolicyManagement] 할인 정책 생성 요청 데이터:', JSON.stringify(requestData, null, 2))
-      createDiscountPolicyMutation.mutate(requestData)
-    }).catch((error) => {
-      console.error('[PolicyManagement] 폼 검증 에러:', error)
-      message.error('입력값을 확인해주세요.')
-    })
-  }
-
-  const handleDiscountRuleSubmit = () => {
-    discountRuleForm.validateFields().then((values) => {
-      console.log('[PolicyManagement] 할인 룰 폼 검증 완료, 원본 값:', values);
-      
-      // 필수 필드 검증
-      const policyId = Number(values.policyId);
-      if (isNaN(policyId) || policyId <= 0) {
-        message.error('유효한 정책 ID를 입력해주세요.')
-        return
-      }
-      
-      const targetProductId = Number(values.targetProductId);
-      if (isNaN(targetProductId) || targetProductId <= 0) {
-        message.error('유효한 상품 ID를 입력해주세요.')
-        return
-      }
-      
-      const data: DiscountRuleCreateRequest = {
-        policyId: policyId,
-        type: values.type,
-        targetProductId: targetProductId,
-        label: values.label.trim(),
-        applyScope: values.applyScope ?? 'ALL',
-        active: values.active ?? true,
-      }
-      
-      // 타입별 필수 필드 추가
-      if (values.type === 'BANK_TRANSFER_RATE' || values.type === 'QTY_RATE') {
-        // RATE 타입은 discountRate가 필요하고 amountOff는 0으로 설정
-        if (values.discountRate === undefined || values.discountRate === null) {
-          message.error('할인율을 입력해주세요.')
-          return
-        }
-        const discountRate = Number(values.discountRate);
-        if (isNaN(discountRate) || discountRate < 0 || discountRate > 100) {
-          message.error('할인율은 0~100 사이의 값을 입력해주세요.')
-          return
-        }
-        data.discountRate = discountRate
-        data.amountOff = 0 // RATE 타입일 때는 amountOff를 0으로 설정
-      } else if (values.type === 'BANK_TRANSFER_FIXED' || values.type === 'QTY_FIXED') {
-        // FIXED 타입은 amountOff가 필요하고 discountRate는 0으로 설정
-        if (values.amountOff === undefined || values.amountOff === null) {
-          message.error('할인 금액을 입력해주세요.')
-          return
-        }
-        const amountOff = Number(values.amountOff);
-        if (isNaN(amountOff) || amountOff < 0) {
-          message.error('할인 금액은 0 이상의 값을 입력해주세요.')
-          return
-        }
-        data.amountOff = amountOff
-        data.discountRate = 0 // FIXED 타입일 때는 discountRate를 0으로 설정
-      }
-      
-      // 선택적 필드 추가 (undefined/null/빈 문자열이 아닐 때만)
-      if (values.minAmount !== undefined && values.minAmount !== null && values.minAmount !== '') {
-        const minAmount = Number(values.minAmount);
-        if (!isNaN(minAmount) && minAmount >= 0) {
-          data.minAmount = minAmount
-        }
-      }
-      if (values.minQty !== undefined && values.minQty !== null && values.minQty !== '') {
-        const minQty = Number(values.minQty);
-        if (!isNaN(minQty) && minQty >= 0) {
-          data.minQty = minQty
-        }
-      }
-      
-      // 최종 데이터 정리 (모든 필드 포함, 필수가 아니면 0)
-      const cleanedData: DiscountRuleCreateRequest = {
-        policyId: data.policyId,
-        type: data.type,
-        targetProductId: data.targetProductId,
-        label: data.label,
-        applyScope: data.applyScope || 'ALL',
-        active: data.active,
-        // 모든 필드 포함 (필수가 아니면 기본값 설정)
-        discountRate: data.discountRate !== undefined ? data.discountRate : 0,
-        amountOff: data.amountOff !== undefined ? data.amountOff : 0,
-        minAmount: data.minAmount !== undefined ? data.minAmount : 0,
-        minQty: data.minQty !== undefined ? data.minQty : 0,
-      }
-      
-      // 최종 데이터 검증
-      console.log('[PolicyManagement] 할인 룰 생성 최종 요청 데이터:', JSON.stringify(cleanedData, null, 2))
-      console.log('[PolicyManagement] 데이터 검증:', {
-        policyId: cleanedData.policyId,
-        targetProductId: cleanedData.targetProductId,
-        type: cleanedData.type,
-        label: cleanedData.label,
-        hasDiscountRate: cleanedData.discountRate !== undefined,
-        hasAmountOff: cleanedData.amountOff !== undefined,
-        discountRate: cleanedData.discountRate,
-        amountOff: cleanedData.amountOff,
-        minAmount: cleanedData.minAmount,
-        minQty: cleanedData.minQty,
-        active: cleanedData.active,
-      })
-      
-      createDiscountRuleMutation.mutate(cleanedData)
     }).catch((error) => {
       console.error('[PolicyManagement] 폼 검증 에러:', error)
       message.error('입력값을 확인해주세요.')
@@ -693,9 +519,21 @@ const PolicyManagement = () => {
       title: '우편번호',
       dataIndex: 'zipPrefix',
       key: 'zipPrefix',
-      render: (zipPrefix: string) => {
-        if (!zipPrefix) return '-'
+      render: (zipPrefix: string, record: any) => {
+        console.log('[DEBUG] 우편번호 컬럼 렌더:', { 
+          zipPrefix, 
+          zipPrefixType: typeof zipPrefix,
+          recordId: record?.id,
+          recordType: record?.type,
+          recordLabel: record?.label,
+          fullRecord: record 
+        })
+        if (!zipPrefix) {
+          console.log('[DEBUG] zipPrefix가 falsy, "-" 반환')
+          return '-'
+        }
         const regionName = getRegionFromZipCode(zipPrefix)
+        console.log('[DEBUG] 우편번호 렌더 결과:', { zipPrefix, regionName })
         return (
           <Space direction="vertical" size={0}>
             <Space>
@@ -723,18 +561,54 @@ const PolicyManagement = () => {
       key: 'freeOverAmount',
       render: (amount: number, record: ShippingRuleResponse & { policyId?: number }) => {
         const isEditing = editingFreeOverAmount?.ruleId === record.id
+        
+        const handleSave = async () => {
+          const newAmount = Number(editingFreeOverAmountValue)
+          if (isNaN(newAmount) || newAmount < 0) {
+            message.error('유효한 금액을 입력해주세요.')
+            return
+          }
+          
+          const policyId = editingFreeOverAmount?.policyId || record.policyId
+          if (!policyId) {
+            message.error('정책 ID를 찾을 수 없습니다.')
+            return
+          }
+          
+          try {
+            // 1. 기존 룰 삭제
+            await apiService.deleteShippingRule(record.id)
+            
+            // 2. 새 룰 생성 (같은 내용, freeOverAmount만 변경)
+            await apiService.createShippingRule({
+              policyId: policyId,
+              type: record.type,
+              label: record.label,
+              active: record.active,
+              zipPrefix: record.zipPrefix || undefined,
+              fee: record.fee || 0,
+              freeOverAmount: newAmount,
+            })
+            
+            message.success('무료배송 금액이 수정되었습니다.')
+            setEditingFreeOverAmount(null)
+            setEditingFreeOverAmountValue('')
+            refetchShippingPolicies()
+          } catch (error: any) {
+            console.error('무료배송 금액 수정 실패:', error)
+            message.error(error.response?.data?.message || '수정에 실패했습니다.')
+            // 실패 시에도 refetch하여 현재 상태 동기화
+            refetchShippingPolicies()
+          }
+        }
+        
         if (isEditing) {
           return (
             <Space>
               <InputNumber
                 value={Number(editingFreeOverAmountValue)}
                 onChange={(val) => setEditingFreeOverAmountValue(String(val ?? 0))}
-                onPressEnter={() => {
-                  // TODO: API 추가 필요 - 무료배송 금액 업데이트
-                  message.info('무료배송 금액 업데이트 API가 필요합니다.')
-                  setEditingFreeOverAmount(null)
-                  setEditingFreeOverAmountValue('')
-                }}
+                onPressEnter={handleSave}
                 autoFocus
                 size="small"
                 style={{ width: 120 }}
@@ -745,11 +619,7 @@ const PolicyManagement = () => {
               <Button
                 size="small"
                 type="primary"
-                onClick={() => {
-                  message.info('무료배송 금액 업데이트 API가 필요합니다.')
-                  setEditingFreeOverAmount(null)
-                  setEditingFreeOverAmountValue('')
-                }}
+                onClick={handleSave}
               >
                 저장
               </Button>
@@ -806,288 +676,73 @@ const PolicyManagement = () => {
     },
   ]
 
-  const discountPolicyColumns = [
-    {
-      title: '정책 ID',
-      dataIndex: 'id',
-      key: 'id',
-      width: 100,
-    },
-    {
-      title: '정책명',
-      dataIndex: 'name',
-      key: 'name',
-    },
-    {
-      title: '시작일',
-      dataIndex: 'startAt',
-      key: 'startAt',
-      render: (date: string) => dayjs(date).format('YYYY-MM-DD HH:mm'),
-    },
-    {
-      title: '종료일',
-      dataIndex: 'endAt',
-      key: 'endAt',
-      render: (date: string) => dayjs(date).format('YYYY-MM-DD HH:mm'),
-    },
-    {
-      title: '상태',
-      dataIndex: 'active',
-      key: 'active',
-      width: 100,
-      render: (active: boolean) => (
-        <Tag color={active ? 'green' : 'red'}>{active ? '활성' : '비활성'}</Tag>
-      ),
-    },
-    {
-      title: '작업',
-      key: 'actions',
-      width: 100,
-      render: (_: any, record: DiscountPolicyResponse) => (
-        <Button
-          type="link"
-          danger
-          icon={<DeleteOutlined />}
-          onClick={() => handleDeleteDiscountPolicy(record.id)}
-          loading={deleteDiscountPolicyMutation.isPending}
-        >
-          삭제
-        </Button>
-      ),
-    },
-  ]
-
-  const discountRuleColumns = [
-    {
-      title: '룰 ID',
-      dataIndex: 'id',
-      key: 'id',
-      width: 100,
-    },
-    {
-      title: '정책 ID',
-      dataIndex: 'policyId',
-      key: 'policyId',
-      width: 100,
-    },
-    {
-      title: '타입',
-      dataIndex: 'type',
-      key: 'type',
-      width: 150,
-      render: (type: string) => {
-        const typeMap: Record<string, string> = {
-          BANK_TRANSFER_FIXED: '무통장 고정할인',
-          QTY_FIXED: '수량 고정할인',
-          BANK_TRANSFER_RATE: '무통장 비율할인',
-          QTY_RATE: '수량 비율할인',
-        }
-        return typeMap[type] || type
-      },
-    },
-    {
-      title: '라벨',
-      dataIndex: 'label',
-      key: 'label',
-    },
-    {
-      title: '상품 ID',
-      dataIndex: 'targetProductId',
-      key: 'targetProductId',
-      render: (id: number) => id || '전체',
-    },
-    {
-      title: '할인율',
-      dataIndex: 'discountRate',
-      key: 'discountRate',
-      render: (rate: number) => rate !== undefined ? `${rate}%` : '-',
-    },
-    {
-      title: '할인금액',
-      dataIndex: 'amountOff',
-      key: 'amountOff',
-      render: (amount: number) => amount !== undefined ? `${amount.toLocaleString()}원` : '-',
-    },
-    {
-      title: '최소금액',
-      dataIndex: 'minAmount',
-      key: 'minAmount',
-      render: (amount: number) => amount !== undefined ? `${amount.toLocaleString()}원` : '-',
-    },
-    {
-      title: '최소수량',
-      dataIndex: 'minQty',
-      key: 'minQty',
-      render: (qty: number) => qty !== undefined ? qty : '-',
-    },
-    {
-      title: '상태',
-      dataIndex: 'active',
-      key: 'active',
-      width: 100,
-      render: (active: boolean) => (
-        <Tag color={active ? 'green' : 'red'}>{active ? '활성' : '비활성'}</Tag>
-      ),
-    },
-    {
-      title: '작업',
-      key: 'actions',
-      width: 100,
-      render: (_: any, record: DiscountRuleResponse & { policyId?: number }) => (
-        <Button
-          type="link"
-          danger
-          icon={<DeleteOutlined />}
-          onClick={() => handleDeleteDiscountRule(record.id)}
-          loading={deleteDiscountRuleMutation.isPending}
-        >
-          삭제
-        </Button>
-      ),
-    },
-  ]
-
   return (
     <div>
       <div style={{ marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-        <Title level={2} style={{ margin: 0 }}>정책 관리</Title>
+        <Title level={2} style={{ margin: 0 }}>배송비 정책 관리</Title>
         <Space wrap>
           <Button 
             icon={<ReloadOutlined />} 
             onClick={() => {
-              // 모든 관련 쿼리 무효화 후 강제로 다시 불러오기
               queryClient.invalidateQueries({ queryKey: ['shippingPolicies'] })
-              queryClient.invalidateQueries({ queryKey: ['discountPolicies'] })
               queryClient.refetchQueries({ queryKey: ['shippingPolicies'] })
-              queryClient.refetchQueries({ queryKey: ['discountPolicies'] })
               refetchShippingPolicies()
-              refetchDiscountPolicies()
             }}
-            loading={isLoadingShippingPolicies || isLoadingDiscountPolicies}
+            loading={isLoadingShippingPolicies}
           >
             새로고침
+          </Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setIsShippingPolicyModalOpen(true)}>
+            배송비 정책 생성
           </Button>
         </Space>
       </div>
 
-      <Card>
-        <Tabs activeKey={activeTab} onChange={setActiveTab}>
-          <Tabs.TabPane tab="배송비 정책" key="shipping">
-            <Space direction="vertical" style={{ width: '100%' }} size="large">
-              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                <Space wrap>
-                  <Button type="primary" icon={<PlusOutlined />} onClick={() => setIsShippingPolicyModalOpen(true)}>
-                    배송비 정책 생성
+      <Card title="배송비 정책 목록">
+        <Table
+          columns={shippingPolicyColumns}
+          dataSource={shippingPoliciesData?.data || []}
+          rowKey="id"
+          loading={isLoadingShippingPolicies}
+          pagination={{ pageSize: 10 }}
+          locale={{ emptyText: '등록된 배송비 정책이 없습니다.' }}
+          expandable={{
+            expandedRowRender: (record: ShippingPolicyResponse) => (
+              <div style={{ margin: 0, paddingLeft: 24 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <Typography.Text strong>
+                    배송비 룰 목록 ({record.rules?.length || 0}개)
+                  </Typography.Text>
+                  <Button
+                    type="primary"
+                    size="small"
+                    icon={<PlusOutlined />}
+                    onClick={() => {
+                      setSelectedShippingPolicyId(record.id)
+                      shippingRuleForm.setFieldsValue({ policyId: record.id })
+                      setIsShippingRuleModalOpen(true)
+                    }}
+                  >
+                    룰 추가
                   </Button>
-                </Space>
+                </div>
+                {record.rules && record.rules.length > 0 ? (
+                  <Table
+                    columns={shippingRuleColumns}
+                    dataSource={record.rules.map(rule => ({ ...rule, policyId: record.id }))}
+                    rowKey="id"
+                    pagination={false}
+                    size="small"
+                    locale={{ emptyText: '등록된 배송비 룰이 없습니다.' }}
+                  />
+                ) : (
+                  <Typography.Text type="secondary">등록된 배송비 룰이 없습니다.</Typography.Text>
+                )}
               </div>
-              <Card title="배송비 정책 목록" size="small">
-                <Table
-                  columns={shippingPolicyColumns}
-                  dataSource={shippingPoliciesData?.data || []}
-                  rowKey="id"
-                  loading={isLoadingShippingPolicies}
-                  pagination={{ pageSize: 10 }}
-                  locale={{ emptyText: '등록된 배송비 정책이 없습니다.' }}
-                  expandable={{
-                    expandedRowRender: (record: ShippingPolicyResponse) => (
-                      <div style={{ margin: 0, paddingLeft: 24 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                          <Typography.Text strong>
-                            배송비 룰 목록 ({record.rules?.length || 0}개)
-                          </Typography.Text>
-                          <Button
-                            type="primary"
-                            size="small"
-                            icon={<PlusOutlined />}
-                            onClick={() => {
-                              setSelectedShippingPolicyId(record.id)
-                              shippingRuleForm.setFieldsValue({ policyId: record.id })
-                              setIsShippingRuleModalOpen(true)
-                            }}
-                          >
-                            룰 추가
-                          </Button>
-                        </div>
-                        {record.rules && record.rules.length > 0 ? (
-                          <Table
-                            columns={shippingRuleColumns}
-                            dataSource={record.rules.map(rule => ({ ...rule, policyId: record.id }))}
-                            rowKey="id"
-                            pagination={false}
-                            size="small"
-                            locale={{ emptyText: '등록된 배송비 룰이 없습니다.' }}
-                          />
-                        ) : (
-                          <Typography.Text type="secondary">등록된 배송비 룰이 없습니다.</Typography.Text>
-                        )}
-                      </div>
-                    ),
-                    rowExpandable: () => true,
-                  }}
-                />
-              </Card>
-            </Space>
-          </Tabs.TabPane>
-
-          <Tabs.TabPane tab="할인 정책" key="discount">
-            <Space direction="vertical" style={{ width: '100%' }} size="large">
-              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                <Space wrap>
-                  <Button type="primary" icon={<PlusOutlined />} onClick={() => setIsDiscountPolicyModalOpen(true)}>
-                    할인 정책 생성
-                  </Button>
-                </Space>
-              </div>
-              <Card title="할인 정책 목록" size="small">
-                <Table
-                  columns={discountPolicyColumns}
-                  dataSource={discountPoliciesData?.data || []}
-                  rowKey="id"
-                  loading={isLoadingDiscountPolicies}
-                  pagination={{ pageSize: 10 }}
-                  locale={{ emptyText: '등록된 할인 정책이 없습니다.' }}
-                  expandable={{
-                    expandedRowRender: (record: DiscountPolicyResponse) => (
-                      <div style={{ margin: 0, paddingLeft: 24 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                          <Typography.Text strong>
-                            할인 룰 목록 ({record.rules?.length || 0}개)
-                          </Typography.Text>
-                          <Button
-                            type="primary"
-                            size="small"
-                            icon={<PlusOutlined />}
-                            onClick={() => {
-                              setSelectedDiscountPolicyId(record.id)
-                              discountRuleForm.setFieldsValue({ policyId: record.id })
-                              setIsDiscountRuleModalOpen(true)
-                            }}
-                          >
-                            룰 추가
-                          </Button>
-                        </div>
-                        {record.rules && record.rules.length > 0 ? (
-                          <Table
-                            columns={discountRuleColumns}
-                            dataSource={record.rules.map(rule => ({ ...rule, policyId: record.id }))}
-                            rowKey="id"
-                            pagination={false}
-                            size="small"
-                            locale={{ emptyText: '등록된 할인 룰이 없습니다.' }}
-                          />
-                        ) : (
-                          <Typography.Text type="secondary">등록된 할인 룰이 없습니다.</Typography.Text>
-                        )}
-                      </div>
-                    ),
-                    rowExpandable: () => true,
-                  }}
-                />
-              </Card>
-            </Space>
-          </Tabs.TabPane>
-        </Tabs>
+            ),
+            rowExpandable: () => true,
+          }}
+        />
       </Card>
 
       {/* 배송비 정책 생성 모달 */}
@@ -1184,8 +839,8 @@ const PolicyManagement = () => {
                       <Form.Item
                         label={
                           <Space>
-                            <span>우편번호 접두사</span>
-                            <Tag color="blue">전체 우편번호 5자리</Tag>
+                            <span>우편번호</span>
+                            <Tag color="blue">5자리</Tag>
                           </Space>
                         }
                         name="zipPrefix"
@@ -1196,7 +851,7 @@ const PolicyManagement = () => {
                         extra="주소 검색 버튼을 클릭하여 주소를 자동으로 불러올 수 있습니다."
                       >
                         <Space.Compact style={{ width: '100%' }}>
-                          <Input placeholder="예: 060 (강남구), 062 (강동구)" maxLength={3} />
+                          <Input placeholder="예: 06035, 06236" maxLength={5} />
                           <Button
                             onClick={() => {
                               // Daum Postcode API를 사용한 주소 검색
@@ -1206,6 +861,8 @@ const PolicyManagement = () => {
                                   oncomplete: (data: any) => {
                                     // 우편번호 전체를 저장
                                     const fullZipCode = data.zonecode || ''
+                                    console.log('[DEBUG] 다음 주소 API 응답:', data)
+                                    console.log('[DEBUG] zonecode:', fullZipCode)
                                     shippingRuleForm.setFieldsValue({
                                       zipPrefix: fullZipCode,
                                     })
@@ -1258,157 +915,6 @@ const PolicyManagement = () => {
                 </>
               )
             }}
-          </Form.Item>
-          <Form.Item label="활성화" name="active" valuePropName="checked" initialValue={true}>
-            <Switch checkedChildren="활성" unCheckedChildren="비활성" />
-          </Form.Item>
-        </Form>
-      </Modal>
-
-      {/* 할인 정책 생성 모달 */}
-      <Modal
-        title="할인 정책 생성"
-        open={isDiscountPolicyModalOpen}
-        onOk={handleDiscountPolicySubmit}
-        onCancel={() => {
-          setIsDiscountPolicyModalOpen(false)
-          discountPolicyForm.resetFields()
-        }}
-        confirmLoading={createDiscountPolicyMutation.isPending}
-        width={600}
-      >
-        <Form form={discountPolicyForm} layout="vertical">
-          <Form.Item
-            label="정책명"
-            name="name"
-            rules={[{ required: true, message: '정책명을 입력해주세요.' }]}
-          >
-            <Input placeholder="예: 무통장/수량 할인 프로모션" />
-          </Form.Item>
-          <Form.Item
-            label="적용 기간"
-            name="dateRange"
-            rules={[{ required: true, message: '적용 기간을 선택해주세요.' }]}
-          >
-            <RangePicker showTime style={{ width: '100%' }} />
-          </Form.Item>
-          <Form.Item label="활성화" name="active" valuePropName="checked" initialValue={true}>
-            <Switch checkedChildren="활성" unCheckedChildren="비활성" />
-          </Form.Item>
-        </Form>
-      </Modal>
-
-      {/* 할인 룰 생성 모달 */}
-      <Modal
-        title="할인 룰 생성"
-        open={isDiscountRuleModalOpen}
-        onOk={handleDiscountRuleSubmit}
-        onCancel={() => {
-          setIsDiscountRuleModalOpen(false)
-          setSelectedDiscountPolicyId(null)
-          discountRuleForm.resetFields()
-        }}
-        confirmLoading={createDiscountRuleMutation.isPending}
-        width={600}
-      >
-        <Form form={discountRuleForm} layout="vertical">
-          <Form.Item
-            label="정책"
-            name="policyId"
-            rules={[{ required: true, message: '정책을 선택해주세요.' }]}
-          >
-            <Select 
-              placeholder="정책 선택" 
-              disabled={selectedDiscountPolicyId !== null}
-            >
-              {discountPoliciesData?.data?.map(policy => (
-                <Select.Option key={policy.id} value={policy.id}>
-                  {policy.name} (ID: {policy.id})
-                </Select.Option>
-              ))}
-            </Select>
-          </Form.Item>
-          <Form.Item
-            label="타입"
-            name="type"
-            rules={[{ required: true, message: '타입을 선택해주세요.' }]}
-          >
-            <Select placeholder="타입 선택">
-              <Select.Option value="BANK_TRANSFER_FIXED">무통장 고정할인</Select.Option>
-              <Select.Option value="QTY_FIXED">수량 고정할인</Select.Option>
-              <Select.Option value="BANK_TRANSFER_RATE">무통장 비율할인</Select.Option>
-              <Select.Option value="QTY_RATE">수량 비율할인</Select.Option>
-            </Select>
-          </Form.Item>
-          <Form.Item
-            label="적용 범위"
-            name="applyScope"
-            rules={[{ required: true, message: '적용 범위를 선택해주세요.' }]}
-            initialValue="ALL"
-          >
-            <Select placeholder="적용 범위 선택">
-              <Select.Option value="ALL">전체 (배송 + 픽업)</Select.Option>
-              <Select.Option value="PICKUP">픽업 전용</Select.Option>
-            </Select>
-          </Form.Item>
-          <Form.Item
-            label="라벨"
-            name="label"
-            rules={[{ required: true, message: '라벨을 입력해주세요.' }]}
-          >
-            <Input placeholder="예: 무통장 할인" />
-          </Form.Item>
-          <Form.Item
-            label="상품 ID"
-            name="targetProductId"
-            rules={[
-              { required: true, message: '상품 ID를 입력해주세요.' },
-              { type: 'number', min: 1, message: '1 이상의 값을 입력해주세요.' },
-            ]}
-          >
-            <InputNumber style={{ width: '100%' }} placeholder="상품 ID" min={1} />
-          </Form.Item>
-          <Form.Item
-            noStyle
-            shouldUpdate={(prevValues, currentValues) => prevValues.type !== currentValues.type}
-          >
-            {({ getFieldValue }) => {
-              const type = getFieldValue('type')
-              return (
-                <>
-                  {(type === 'BANK_TRANSFER_RATE' || type === 'QTY_RATE') && (
-                    <Form.Item
-                      label="할인율 (%)"
-                      name="discountRate"
-                      rules={[
-                        { required: true, message: '할인율을 입력해주세요.' },
-                        { type: 'number', min: 0, max: 100, message: '0~100 사이의 값을 입력해주세요.' },
-                      ]}
-                    >
-                      <InputNumber style={{ width: '100%' }} placeholder="10" min={0} max={100} />
-                    </Form.Item>
-                  )}
-                  {(type === 'BANK_TRANSFER_FIXED' || type === 'QTY_FIXED') && (
-                    <Form.Item
-                      label="할인금액"
-                      name="amountOff"
-                      rules={[
-                        { required: true, message: '할인금액을 입력해주세요.' },
-                        { type: 'number', min: 0, message: '0 이상의 값을 입력해주세요.' },
-                      ]}
-                    >
-                      <InputNumber style={{ width: '100%' }} placeholder="4500" min={0} />
-                    </Form.Item>
-                  )}
-                </>
-              )
-            }}
-          </Form.Item>
-          <Form.Item label="최소금액" name="minAmount">
-            <InputNumber style={{ width: '100%' }} placeholder="30000" min={0} />
-          </Form.Item>
-          <Form.Item label="최소수량" name="minQty">
-            <InputNumber style={{ width: '100%' }} placeholder="3" min={0} />
           </Form.Item>
           <Form.Item label="활성화" name="active" valuePropName="checked" initialValue={true}>
             <Switch checkedChildren="활성" unCheckedChildren="비활성" />

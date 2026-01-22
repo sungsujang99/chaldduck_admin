@@ -18,7 +18,7 @@ import {
   Select,
   Collapse,
 } from 'antd'
-import { PlusOutlined, ReloadOutlined, DeleteOutlined, GiftOutlined, ExclamationCircleOutlined } from '@ant-design/icons'
+import { PlusOutlined, ReloadOutlined, DeleteOutlined, GiftOutlined, ExclamationCircleOutlined, OrderedListOutlined, ArrowUpOutlined, ArrowDownOutlined } from '@ant-design/icons'
 import { Dayjs } from 'dayjs'
 import { apiService } from '@/services/api'
 import type { 
@@ -30,6 +30,8 @@ import type {
   DiscountPolicyResponse,
   DiscountRuleCreateRequest,
   ProductUpdateRequest,
+  ProductReorderRequest,
+  ProductOrderItem,
 } from '@/types/api'
 
 const { Title } = Typography
@@ -111,11 +113,21 @@ const ProductList = () => {
   const [categories, setCategories] = useState<CategoryInfo[]>(loadCategories())
   const [editingCategory, setEditingCategory] = useState<CategoryInfo | null>(null)
   const [categoryEditForm] = Form.useForm()
+  // 상품 전시 순서 변경 관련 상태
+  const [isReorderModalOpen, setIsReorderModalOpen] = useState(false)
+  const [reorderList, setReorderList] = useState<AdminProductStockRow[]>([])
 
   const { data: productsData, isLoading, error, refetch } = useQuery({
     queryKey: ['products'],
     queryFn: () => apiService.getProducts(),
-    retry: false,
+    retry: (failureCount, error: any) => {
+      // 500 에러는 최대 2번 재시도
+      if (error?.response?.status === 500 && failureCount < 2) {
+        return true;
+      }
+      return false;
+    },
+    retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 30000),
     meta: {
       errorMessage: '상품 목록을 불러오는데 실패했습니다.',
     },
@@ -164,11 +176,11 @@ const ProductList = () => {
     return discounts
   }, [discountPoliciesData?.data])
 
-  // 무통장 할인 rule 찾기
+  // 무통장 할인 rule 찾기 (PICKUP 제외)
   const getBankTransferRule = (product: AdminProductStockRow): DiscountRuleResponse | null => {
     const productDiscounts = getProductDiscounts[product.productId] || []
     return productDiscounts.find(
-      (rule) => rule.type === 'BANK_TRANSFER_RATE' || rule.type === 'BANK_TRANSFER_FIXED'
+      (rule) => (rule.type === 'BANK_TRANSFER_RATE' || rule.type === 'BANK_TRANSFER_FIXED') && rule.applyScope !== 'PICKUP'
     ) || null
   }
 
@@ -317,11 +329,12 @@ const ProductList = () => {
 
   // 제품 재고 및 안전재고 업데이트
   const updateProductMutation = useMutation({
-    mutationFn: async ({ productId, data }: { productId: number; data: ProductUpdateRequest }) => {
+    mutationFn: async ({ productId, data, currentProduct }: { productId: number; data: ProductUpdateRequest; currentProduct?: AdminProductStockRow }) => {
       if (data.stockQty !== undefined || data.safetyStock !== undefined) {
+        // 변경되지 않은 필드는 기존 값 유지
         await apiService.updateProductStock(productId, {
-          stockQty: data.stockQty ?? 0,
-          safetyStock: data.safetyStock ?? 0,
+          stockQty: data.stockQty ?? currentProduct?.stockQty ?? 0,
+          safetyStock: data.safetyStock ?? currentProduct?.safetyStock ?? 0,
         })
       }
       return { status: 200, message: 'OK', data: { productId, ...data } }
@@ -438,23 +451,52 @@ const ProductList = () => {
       refetchDiscountPolicies()
     },
     onError: (error: any) => {
-      message.error(error.response?.data?.message || '할인 룰 생성에 실패했습니다.')
-    },
-  })
-
-  // 할인 룰 업데이트
-  const updateDiscountRuleMutation = useMutation({
-    mutationFn: ({ ruleId, data }: { ruleId: number; data: any }) => 
-      apiService.updateDiscountRule(ruleId, data),
-    onSuccess: () => {
-      message.success('무통장 할인가가 수정되었습니다.')
-      queryClient.invalidateQueries({ queryKey: ['discountPolicies'] })
-      refetchDiscountPolicies()
-      setEditingCell(null)
-      setEditingValue('')
-    },
-    onError: (error: any) => {
-      message.error(error.response?.data?.message || '할인 룰 수정에 실패했습니다.')
+      console.error('[ProductList] 할인 룰 생성 에러 상세:', {
+        status: error.response?.status,
+        statusText: error.response?.statusText,
+        responseData: error.response?.data,
+        requestData: error.config?.data ? JSON.parse(error.config.data) : 'N/A',
+        message: error.message,
+        fullError: error,
+      });
+      
+      // 서버 에러 메시지 추출
+      let errorMessage = '할인 룰 생성에 실패했습니다.';
+      if (error.response?.data) {
+        const responseData = error.response.data;
+        if (responseData.message) {
+          errorMessage = responseData.message;
+        } else if (responseData.error) {
+          errorMessage = responseData.error;
+        } else if (responseData.exception) {
+          errorMessage = `서버 오류: ${responseData.exception}`;
+        } else if (error.response.status === 500) {
+          errorMessage = '서버 내부 오류가 발생했습니다. 서버 관리자에게 문의하세요.';
+        } else {
+          errorMessage = `서버 오류 (${error.response.status}): ${JSON.stringify(responseData)}`;
+        }
+        
+        // 필드별 에러가 있으면 추가 정보 표시
+        if (responseData.errors && Array.isArray(responseData.errors)) {
+          const fieldErrors = responseData.errors.map((e: any) => e.defaultMessage || e.message).join(', ');
+          if (fieldErrors) {
+            errorMessage += ` (${fieldErrors})`;
+          }
+        }
+      } else if (error.message) {
+        errorMessage = error.message;
+      }
+      
+      message.error({
+        content: errorMessage,
+        duration: 5,
+      });
+      
+      // 개발 환경에서는 상세 정보도 표시
+      if (import.meta.env.DEV) {
+        console.error('[ProductList] 요청 데이터:', error.config?.data ? JSON.parse(error.config.data) : 'N/A');
+        console.error('[ProductList] 응답 데이터:', error.response?.data);
+      }
     },
   })
 
@@ -482,9 +524,61 @@ const ProductList = () => {
     },
   })
 
+  // 상품 정렬 순서 변경
+  const reorderProductsMutation = useMutation({
+    mutationFn: (data: ProductReorderRequest) => apiService.reorderProducts(data),
+    onSuccess: () => {
+      message.success('상품 순서가 변경되었습니다.')
+      setIsReorderModalOpen(false)
+      setReorderList([])
+      queryClient.invalidateQueries({ queryKey: ['products'] })
+      refetch()
+    },
+    onError: (error: any) => {
+      message.error(error.response?.data?.message || '상품 순서 변경에 실패했습니다.')
+    },
+  })
+
   const handleAddProduct = () => {
     form.resetFields()
     setIsModalOpen(true)
+  }
+
+  // 상품 순서 변경 모달 열기
+  const handleOpenReorderModal = () => {
+    // sortOrder 기준으로 정렬된 상품 목록 복사
+    const sortedProducts = [...activeProducts].sort((a, b) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999))
+    setReorderList(sortedProducts)
+    setIsReorderModalOpen(true)
+  }
+
+  // 상품 순서 위로 이동
+  const handleMoveUp = (index: number) => {
+    if (index === 0) return
+    const newList = [...reorderList]
+    const temp = newList[index - 1]
+    newList[index - 1] = newList[index]
+    newList[index] = temp
+    setReorderList(newList)
+  }
+
+  // 상품 순서 아래로 이동
+  const handleMoveDown = (index: number) => {
+    if (index === reorderList.length - 1) return
+    const newList = [...reorderList]
+    const temp = newList[index + 1]
+    newList[index + 1] = newList[index]
+    newList[index] = temp
+    setReorderList(newList)
+  }
+
+  // 상품 순서 저장
+  const handleSaveReorder = () => {
+    const items: ProductOrderItem[] = reorderList.map((product, index) => ({
+      productId: product.productId,
+      sortOrder: index + 1, // 1부터 시작
+    }))
+    reorderProductsMutation.mutate({ items })
   }
 
   // const handleEditStock = (product: AdminProductStockRow) => {
@@ -672,20 +766,36 @@ const ProductList = () => {
         data.discountRate = 0
       }
 
-      // 선택적 필드 추가
+      // 선택적 필드 추가 (서버 규격: null 허용 안 함, 모든 필드 명시)
       if (values.minAmount !== undefined && values.minAmount !== null && values.minAmount !== '') {
         const minAmount = Number(values.minAmount)
         if (!isNaN(minAmount) && minAmount >= 0) {
+          // minAmount가 너무 작으면 경고 (1000원 미만)
+          if (minAmount > 0 && minAmount < 1000) {
+            console.warn('[ProductList] minAmount가 매우 작습니다:', minAmount);
+          }
           data.minAmount = minAmount
+        } else {
+          data.minAmount = 0 // null 허용 안 함
         }
+      } else {
+        data.minAmount = 0 // null 허용 안 함
       }
+      
       if (values.minQty !== undefined && values.minQty !== null && values.minQty !== '') {
         const minQty = Number(values.minQty)
         if (!isNaN(minQty) && minQty >= 0) {
           data.minQty = minQty
+        } else {
+          data.minQty = 0 // null 허용 안 함
         }
+      } else {
+        data.minQty = 0 // null 허용 안 함
       }
 
+      // 최종 데이터 검증 로그
+      console.log('[ProductList] 할인 룰 생성 최종 요청 데이터:', JSON.stringify(data, null, 2));
+      
       createDiscountRuleMutation.mutate(data)
     }).catch((error) => {
       console.error('[ProductList] 할인 룰 폼 검증 에러:', error)
@@ -747,126 +857,140 @@ const ProductList = () => {
 
   // 셀 편집 저장
   const handleCellSave = async (productId: number, field: string) => {
+    console.log('[handleCellSave] 호출됨:', { productId, field, editingValue })
+    
     const product = activeProducts.find(p => p.productId === productId)
-    if (!product) return
+    if (!product) {
+      console.log('[handleCellSave] 상품을 찾을 수 없음:', productId)
+      return
+    }
 
     const numValue = Number(editingValue)
+    console.log('[handleCellSave] numValue:', numValue)
 
     if (field === 'bankTransferPrice') {
-      // 현금가 저장 로직
-      if (isNaN(numValue) || numValue <= 0) {
-        message.error('올바른 현금가를 입력해주세요.')
+      // 무통장 할인 금액 저장 로직 (입력값 = 할인 금액)
+      if (isNaN(numValue) || numValue < 0) {
+        message.error('올바른 할인 금액을 입력해주세요.')
         return
       }
       
       if (numValue >= product.price) {
-        message.error('현금가는 판매가보다 낮아야 합니다.')
+        message.error('할인 금액은 판매가보다 작아야 합니다.')
         return
       }
 
-      // 할인 금액 계산
-      const amountOff = product.price - numValue
+      // 입력값이 할인 금액
+      const amountOff = numValue
+      const discountedPrice = product.price - numValue
+
+      // 상단에서 정책을 선택했는지 확인 (생성 시 필요)
+      if (checkedPolicyIds.length === 0) {
+        message.error('정책을 체크해주세요.')
+        return
+      }
+      const selectedPolicyId = checkedPolicyIds[0]
 
       // 기존 무통장 할인 rule 찾기
       const existingRule = getBankTransferRule(product)
 
-      // 활성 정책 찾기 (할인 정책이 없으면 에러)
-      const activePolicy = discountPoliciesData?.data?.find(p => p.active)
-      if (!activePolicy) {
-        message.error('활성화된 할인 정책이 없습니다. 먼저 할인 정책을 생성해주세요.')
-        return
-      }
+      // 새 룰 생성 데이터
+      const newRuleData = {
+        policyId: selectedPolicyId,
+        label: `${product.name} 무통장 할인`,
+        type: 'BANK_TRANSFER_FIXED' as const,
+        targetProductId: productId,
+        applyScope: 'ALL' as const,
+        amountOff: amountOff,
+        discountRate: 0,
+        minAmount: discountedPrice,
+        minQty: 1,
+        active: true,
+      };
 
       if (existingRule) {
-        // 기존 rule 업데이트
-        updateDiscountRuleMutation.mutate({
-          ruleId: existingRule.id,
-          data: {
-            label: `${product.name} 무통장 할인`,
-            type: 'BANK_TRANSFER_FIXED',
-            targetProductId: productId,
-            applyScope: 'ALL',
-            amountOff: amountOff,
-            minAmount: numValue,
-            minQty: 1,
-            active: true,
+        // 기존 룰 삭제 후 새로 생성
+        console.log('[ProductList] 기존 무통장 할인 룰 삭제 후 재생성:', existingRule.id);
+        deleteDiscountRuleMutation.mutate(existingRule.id, {
+          onSuccess: () => {
+            console.log('[ProductList] 삭제 성공, 새 룰 생성:', JSON.stringify(newRuleData, null, 2));
+            createDiscountRuleMutation.mutate(newRuleData)
+          },
+          onError: (error: any) => {
+            console.error('[ProductList] 삭제 실패:', error);
+            message.error('기존 할인 룰 삭제에 실패했습니다.')
           }
         })
       } else {
         // 새 rule 생성
-        createDiscountRuleMutation.mutate({
-          policyId: activePolicy.id,
-          label: `${product.name} 무통장 할인`,
-          type: 'BANK_TRANSFER_FIXED',
-          targetProductId: productId,
-          applyScope: 'ALL',
-          amountOff: amountOff,
-          minAmount: numValue,
-          minQty: 1,
-          active: true,
-        })
-        setEditingCell(null)
-        setEditingValue('')
+        console.log('[ProductList] 무통장 할인 룰 생성:', JSON.stringify(newRuleData, null, 2));
+        createDiscountRuleMutation.mutate(newRuleData)
       }
+      setEditingCell(null)
+      setEditingValue('')
       return
     }
 
     if (field === 'pickupDiscountPrice') {
-      // 픽업할인가 저장 로직
-      if (isNaN(numValue) || numValue <= 0) {
-        message.error('올바른 픽업할인가를 입력해주세요.')
+      // 픽업 할인 금액 저장 로직 (입력값 = 할인 금액)
+      if (isNaN(numValue) || numValue < 0) {
+        message.error('올바른 할인 금액을 입력해주세요.')
         return
       }
       
       if (numValue >= product.price) {
-        message.error('픽업할인가는 판매가보다 낮아야 합니다.')
+        message.error('할인 금액은 판매가보다 작아야 합니다.')
         return
       }
 
-      // 할인 금액 계산
-      const amountOff = product.price - numValue
+      // 입력값이 할인 금액
+      const amountOff = numValue
+      const discountedPrice = product.price - numValue
+
+      // 상단에서 정책을 선택했는지 확인 (생성 시 필요)
+      if (checkedPolicyIds.length === 0) {
+        message.error('정책을 체크해주세요.')
+        return
+      }
+      const selectedPolicyId = checkedPolicyIds[0]
 
       // 기존 픽업 할인 rule 찾기
       const existingRule = getPickupDiscountRule(product)
 
-      // 활성 정책 찾기 (할인 정책이 없으면 에러)
-      const activePolicy = discountPoliciesData?.data?.find(p => p.active)
-      if (!activePolicy) {
-        message.error('활성화된 할인 정책이 없습니다. 먼저 할인 정책을 생성해주세요.')
-        return
-      }
+      // 새 룰 생성 데이터
+      const newRuleData = {
+        policyId: selectedPolicyId,
+        label: `${product.name} 픽업 할인`,
+        type: 'BANK_TRANSFER_FIXED' as const,
+        targetProductId: productId,
+        applyScope: 'PICKUP' as const,
+        amountOff: amountOff,
+        discountRate: 0,
+        minAmount: discountedPrice,
+        minQty: 1,
+        active: true,
+      };
 
       if (existingRule) {
-        // 기존 rule 업데이트
-        updateDiscountRuleMutation.mutate({
-          ruleId: existingRule.id,
-          data: {
-            label: `${product.name} 픽업 할인`,
-            type: 'BANK_TRANSFER_FIXED',
-            targetProductId: productId,
-            applyScope: 'PICKUP',
-            amountOff: amountOff,
-            minAmount: numValue,
-            minQty: 1,
-            active: true,
+        // 기존 룰 삭제 후 새로 생성
+        console.log('[ProductList] 기존 픽업 할인 룰 삭제 후 재생성:', existingRule.id);
+        deleteDiscountRuleMutation.mutate(existingRule.id, {
+          onSuccess: () => {
+            console.log('[ProductList] 삭제 성공, 새 룰 생성:', JSON.stringify(newRuleData, null, 2));
+            createDiscountRuleMutation.mutate(newRuleData)
+          },
+          onError: (error: any) => {
+            console.error('[ProductList] 삭제 실패:', error);
+            message.error('기존 할인 룰 삭제에 실패했습니다.')
           }
         })
       } else {
         // 새 rule 생성
-        createDiscountRuleMutation.mutate({
-          policyId: activePolicy.id,
-          label: `${product.name} 픽업 할인`,
-          type: 'BANK_TRANSFER_FIXED',
-          targetProductId: productId,
-          applyScope: 'PICKUP',
-          amountOff: amountOff,
-          minAmount: numValue,
-          minQty: 1,
-          active: true,
-        })
-        setEditingCell(null)
-        setEditingValue('')
+        console.log('[ProductList] 픽업 할인 룰 생성:', JSON.stringify(newRuleData, null, 2));
+        createDiscountRuleMutation.mutate(newRuleData)
       }
+      setEditingCell(null)
+      setEditingValue('')
       return
     }
 
@@ -887,24 +1011,136 @@ const ProductList = () => {
             message.error('올바른 매입가를 입력해주세요.')
             return
           }
-          updateData.purchasePrice = numValue
-          break
+          // 서버 API가 purchasePrice 수정을 지원하지 않아서 삭제 후 재생성
+          {
+            const currentProduct = products?.find(p => p.productId === productId)
+            if (!currentProduct) {
+              message.error('상품을 찾을 수 없습니다.')
+              return
+            }
+            
+            // 같은 값이면 수정하지 않음
+            if (currentProduct.purchasePrice === numValue) {
+              setEditingCell(null)
+              setEditingValue('')
+              return
+            }
+            
+            // 해당 상품에 연결된 할인 룰 가져오기
+            const productDiscountRules = getProductDiscounts[productId] || []
+            
+            // 바로 실행 (확인 없이)
+            ;(async () => {
+              try {
+                message.loading({ content: '매입가 수정 중...', key: 'purchasePrice' })
+                
+                // 1. 기존 할인 룰 정보 저장 (삭제 전에)
+                const existingRules = productDiscountRules.map(rule => ({
+                  policyId: discountPoliciesData?.data?.find(p => p.rules?.some(r => r.id === rule.id))?.id,
+                  label: rule.label,
+                  type: rule.type,
+                  applyScope: rule.applyScope,
+                  discountRate: rule.discountRate ?? 0,
+                  amountOff: rule.amountOff ?? 0,
+                  minAmount: rule.minAmount ?? 0,
+                  minQty: rule.minQty ?? 0,
+                  active: rule.active,
+                  ruleId: rule.id,
+                }))
+                
+                // 2. 기존 할인 룰 삭제
+                for (const rule of existingRules) {
+                  if (rule.ruleId) {
+                    await apiService.deleteDiscountRule(rule.ruleId)
+                  }
+                }
+                
+                // 3. 기존 상품 삭제
+                await apiService.deleteProduct(productId)
+                
+                // 4. 새 상품 생성 (purchasePrice만 수정)
+                const newProductData: ProductCreateRequest = {
+                  name: currentProduct.name,
+                  price: currentProduct.price,
+                  initialStockQty: currentProduct.stockQty ?? 0,
+                  safetyStock: currentProduct.safetyStock ?? 0,
+                  purchasePrice: numValue,
+                  category: currentProduct.category as any,
+                  taxType: currentProduct.taxType as any,
+                }
+                
+                const newProductResponse = await apiService.createProduct(newProductData)
+                const newProductId = newProductResponse.data?.productId
+                
+                // 5. 할인 룰 재생성 (새 productId로)
+                if (newProductId && existingRules.length > 0) {
+                  for (const rule of existingRules) {
+                    if (rule.policyId) {
+                      const newRuleData: DiscountRuleCreateRequest = {
+                        policyId: rule.policyId,
+                        label: rule.label || '',
+                        type: rule.type as any,
+                        targetProductId: newProductId,
+                        applyScope: rule.applyScope as any,
+                        discountRate: rule.discountRate,
+                        amountOff: rule.amountOff,
+                        minAmount: rule.minAmount,
+                        minQty: rule.minQty,
+                        active: rule.active,
+                      }
+                      await apiService.createDiscountRule(newRuleData)
+                    }
+                  }
+                }
+                
+                message.success({ content: '매입가가 수정되었습니다.', key: 'purchasePrice' })
+                setEditingCell(null)
+                setEditingValue('')
+                queryClient.invalidateQueries({ queryKey: ['products'] })
+                queryClient.invalidateQueries({ queryKey: ['discountPolicies'] })
+                refetch()
+                refetchDiscountPolicies()
+              } catch (error: any) {
+                console.error('[ProductList] 매입가 수정 실패:', error)
+                message.error({ 
+                  content: error.response?.data?.message || '매입가 수정에 실패했습니다.', 
+                  key: 'purchasePrice' 
+                })
+              }
+            })()
+          }
+          return
         case 'category':
+          console.log('[DEBUG] 카테고리 수정 시작:', { productId, field, editingValue, currentCategory: product.category })
           updateData.category = editingValue
           break
         case 'taxType':
+          console.log('[DEBUG] 과세유형 수정 시작:', { productId, field, editingValue, currentTaxType: product.taxType })
           updateData.taxType = editingValue
           break
       }
 
+      console.log('[ProductList] ========== 상품 수정 API 호출 ==========')
+      console.log('[ProductList] productId:', productId)
+      console.log('[ProductList] field:', field)
+      console.log('[ProductList] editingValue:', editingValue)
+      console.log('[ProductList] updateData:', JSON.stringify(updateData, null, 2))
+      console.log('[ProductList] API URL:', `/api/v1/admin/products/${productId}`)
+
       // updateProduct API 호출
-      apiService.updateProduct(productId, updateData).then(() => {
+      apiService.updateProduct(productId, updateData).then((response) => {
+        console.log('[ProductList] ========== 상품 수정 성공 ==========')
+        console.log('[ProductList] 응답 데이터:', JSON.stringify(response, null, 2))
         message.success('상품 정보가 수정되었습니다.')
         setEditingCell(null)
         setEditingValue('')
         queryClient.invalidateQueries({ queryKey: ['products'] })
         refetch()
       }).catch((error: any) => {
+        console.error('[ProductList] ========== 상품 수정 실패 ==========')
+        console.error('[ProductList] 에러 상태:', error.response?.status)
+        console.error('[ProductList] 에러 데이터:', JSON.stringify(error.response?.data, null, 2))
+        console.error('[ProductList] 에러 메시지:', error.message)
         message.error(error.response?.data?.message || '상품 수정에 실패했습니다.')
       })
       return
@@ -932,7 +1168,8 @@ const ProductList = () => {
         return
     }
 
-    updateProductMutation.mutate({ productId, data: updateData })
+    // 현재 상품 정보를 함께 전달하여 변경되지 않은 필드는 기존 값 유지
+    updateProductMutation.mutate({ productId, data: updateData, currentProduct: product })
   }
 
   // 셀 편집 취소
@@ -1186,39 +1423,36 @@ const ProductList = () => {
     {
       title: (
         <Space direction="vertical" size={0}>
-          <span>무통장 할인가</span>
+          <span>무통장 할인</span>
           <span style={{ fontSize: 11, fontWeight: 'normal', color: '#999' }}>
             (더블클릭 수정)
           </span>
         </Space>
       ),
       key: 'bankTransferPrice',
-      width: 140,
+      width: 120,
       render: (_: any, record: AdminProductStockRow) => {
         const bankTransferPrice = getBankTransferPrice(record) || record.price
+        const discountAmount = record.price - bankTransferPrice
         const isEditing = editingCell?.productId === record.productId && editingCell?.field === 'bankTransferPrice'
         
         return renderEditableCell(
           record.productId,
           'bankTransferPrice',
-          bankTransferPrice,
+          discountAmount, // 할인 금액을 값으로 전달
           isEditing,
           () => handleCellSave(record.productId, 'bankTransferPrice'),
           handleCellCancel,
           (value) => {
             const numValue = Number(value)
-            const discountAmount = record.price - numValue
-            const discountRate = Math.round((discountAmount / record.price) * 100)
-            return (
-              <Space direction="vertical" size={0}>
+            if (numValue > 0) {
+              return (
                 <Typography.Text strong style={{ color: '#1890ff', fontSize: 14 }}>
-                  {formatCurrency(numValue)}
+                  {numValue.toLocaleString()}원
                 </Typography.Text>
-                <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                  ({discountRate}% 할인)
-                </Typography.Text>
-              </Space>
-            )
+              )
+            }
+            return <Typography.Text type="secondary">-</Typography.Text>
           }
         )
       },
@@ -1249,40 +1483,37 @@ const ProductList = () => {
     {
       title: (
         <Space direction="vertical" size={0}>
-          <span>픽업할인가</span>
+          <span>픽업 할인</span>
           <span style={{ fontSize: 11, fontWeight: 'normal', color: '#999' }}>
             (더블클릭 수정)
           </span>
         </Space>
       ),
       key: 'pickupDiscountPrice',
-      width: 140,
+      width: 120,
       render: (_: any, record: AdminProductStockRow) => {
         const pickupDiscount = getPickupDiscountPrice(record)
         const pickupPrice = pickupDiscount ? pickupDiscount.discountedPrice : record.price
+        const discountAmount = record.price - pickupPrice
         const isEditing = editingCell?.productId === record.productId && editingCell?.field === 'pickupDiscountPrice'
         
         return renderEditableCell(
           record.productId,
           'pickupDiscountPrice',
-          pickupPrice,
+          discountAmount, // 할인 금액을 값으로 전달
           isEditing,
           () => handleCellSave(record.productId, 'pickupDiscountPrice'),
           handleCellCancel,
           (value) => {
             const numValue = Number(value)
-            const discountAmount = record.price - numValue
-            const discountRate = Math.round((discountAmount / record.price) * 100)
-            return (
-              <Space direction="vertical" size={0}>
+            if (numValue > 0) {
+              return (
                 <Typography.Text strong style={{ color: '#52c41a', fontSize: 14 }}>
-                  {formatCurrency(numValue)}
+                  {numValue.toLocaleString()}원
                 </Typography.Text>
-                <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                  ({discountRate}% 할인)
-                </Typography.Text>
-              </Space>
-            )
+              )
+            }
+            return <Typography.Text type="secondary">-</Typography.Text>
           }
         )
       },
@@ -1442,6 +1673,12 @@ const ProductList = () => {
             onClick={() => setIsCategoryManagementOpen(true)}
           >
             카테고리 관리
+          </Button>
+          <Button 
+            icon={<OrderedListOutlined />} 
+            onClick={handleOpenReorderModal}
+          >
+            전시 순서 변경
           </Button>
           <Button type="primary" icon={<PlusOutlined />} onClick={handleAddProduct}>
             상품 등록
@@ -2404,6 +2641,78 @@ WHERE category IS NULL OR tax_type IS NULL;`}
             <Switch checkedChildren="활성" unCheckedChildren="비활성" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* 상품 전시 순서 변경 모달 */}
+      <Modal
+        title="상품 전시 순서 변경"
+        open={isReorderModalOpen}
+        onOk={handleSaveReorder}
+        onCancel={() => {
+          setIsReorderModalOpen(false)
+          setReorderList([])
+        }}
+        confirmLoading={reorderProductsMutation.isPending}
+        width={700}
+        okText="저장"
+        cancelText="취소"
+      >
+        <div style={{ marginBottom: 16 }}>
+          <Typography.Text type="secondary">
+            상품을 위/아래 버튼으로 이동하여 전시 순서를 변경하세요. 위에 있는 상품이 먼저 표시됩니다.
+          </Typography.Text>
+        </div>
+        <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+          {reorderList.map((product, index) => (
+            <div
+              key={product.productId}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '8px 12px',
+                marginBottom: 8,
+                border: '1px solid #d9d9d9',
+                borderRadius: 6,
+                backgroundColor: index % 2 === 0 ? '#fafafa' : '#fff',
+              }}
+            >
+              <Space>
+                <Tag color="blue" style={{ minWidth: 32, textAlign: 'center' }}>
+                  {index + 1}
+                </Tag>
+                <Typography.Text strong>{product.name}</Typography.Text>
+                {product.category && (
+                  <Tag color={getCategoryInfo(product.category, categories)?.color}>
+                    {getCategoryInfo(product.category, categories)?.label}
+                  </Tag>
+                )}
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {formatCurrency(product.price)}
+                </Typography.Text>
+              </Space>
+              <Space>
+                <Button
+                  type="text"
+                  icon={<ArrowUpOutlined />}
+                  onClick={() => handleMoveUp(index)}
+                  disabled={index === 0}
+                  size="small"
+                />
+                <Button
+                  type="text"
+                  icon={<ArrowDownOutlined />}
+                  onClick={() => handleMoveDown(index)}
+                  disabled={index === reorderList.length - 1}
+                  size="small"
+                />
+              </Space>
+            </div>
+          ))}
+        </div>
+        {reorderList.length === 0 && (
+          <Typography.Text type="secondary">표시할 상품이 없습니다.</Typography.Text>
+        )}
       </Modal>
     </div>
   )

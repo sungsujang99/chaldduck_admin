@@ -76,7 +76,7 @@ const Layout = ({ children }: LayoutProps) => {
     {
       key: '/policies',
       icon: <SettingOutlined />,
-      label: '정책 관리',
+      label: '배송비 관리',
     },
   ]
 

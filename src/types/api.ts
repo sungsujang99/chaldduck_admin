@@ -218,6 +218,17 @@ export interface AdminProductStockRow {
   deletedAt?: string;
   category?: ProductCategory;
   taxType?: TaxType;
+  sortOrder?: number;
+}
+
+// 상품 정렬 순서 변경
+export interface ProductOrderItem {
+  productId: number;
+  sortOrder: number;
+}
+
+export interface ProductReorderRequest {
+  items: ProductOrderItem[];
 }
 
 export interface ProductCreateRequest {
