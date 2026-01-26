@@ -30,6 +30,10 @@ const OrdersByCustomer = () => {
       case 'CREATED':
         return 'orange'
       case 'PAID':
+        return 'blue'
+      case 'CONFIRMED':
+        return 'cyan'
+      case 'COMPLETED':
         return 'green'
       case 'CANCELED':
         return 'red'
@@ -44,6 +48,10 @@ const OrdersByCustomer = () => {
         return '생성됨'
       case 'PAID':
         return '결제완료'
+      case 'CONFIRMED':
+        return '확인됨'
+      case 'COMPLETED':
+        return '완료됨'
       case 'CANCELED':
         return '취소됨'
       default:

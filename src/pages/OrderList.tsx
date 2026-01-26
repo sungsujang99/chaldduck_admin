@@ -1,12 +1,13 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Card, Table, Space, Typography, Tag, Button, Select, Row, Col, Modal, message, Input, Form, Tabs } from 'antd'
-import { EyeOutlined, ReloadOutlined, EditOutlined } from '@ant-design/icons'
+import { EyeOutlined, ReloadOutlined, EditOutlined, DownloadOutlined } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router-dom'
+import * as XLSX from 'xlsx'
 import { apiService } from '@/services/api'
 import type { OrderResponse, OrderStatus, FulfillmentType, PaymentMethod } from '@/types/api'
 
-const { Title } = Typography
+// Title 제거됨 - 통계 테이블로 대체
 const { Option } = Select
 
 // Note: API에 전체 주문 리스트 엔드포인트가 없어서
@@ -26,6 +27,7 @@ const OrderList = () => {
   const [isCancelModalOpen, setIsCancelModalOpen] = useState(false)
   const [cancelOrderId, setCancelOrderId] = useState<number | null>(null)
   const [cancelForm] = Form.useForm()
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
 
   // URL 쿼리 파라미터에서 상태 필터 읽기
   useEffect(() => {
@@ -38,7 +40,7 @@ const OrderList = () => {
   }, [searchParams])
 
   // 현재 활성 탭에 따라 주문 상태 필터 결정
-  const getStatusFilter = (tab: string): OrderStatus | 'ALL' | 'DELIVERY' => {
+  const getStatusFilter = (tab: string): OrderStatus | 'ALL' | 'DELIVERY' | 'PICKUP_WAITING' | 'DELIVERY_READY' => {
     switch (tab) {
       case 'ALL':
         return 'ALL'
@@ -54,6 +56,10 @@ const OrderList = () => {
         return 'CANCELED'
       case 'DELIVERY':
         return 'DELIVERY' // 배송 중인 주문
+      case 'PICKUP_WAITING':
+        return 'PICKUP_WAITING' // 픽업대기
+      case 'DELIVERY_READY':
+        return 'DELIVERY_READY' // 배송준비
       default:
         return 'PAID'
     }
@@ -79,6 +85,16 @@ const OrderList = () => {
             const response = await apiService.getAllOrdersAdmin({ page, size: fetchPageSize })
             
             if (response.data && response.data.content && response.data.content.length > 0) {
+              // 첫 번째 주문의 필드 확인 (디버깅용)
+              if (page === 0 && response.data.content[0]) {
+                const order = response.data.content[0] as any
+                console.log('[OrderList] 첫 번째 주문 전체 데이터:', order)
+                console.log('[OrderList] 주문의 모든 키:', Object.keys(order))
+                console.log('[OrderList] createdAt:', order.createdAt)
+                console.log('[OrderList] updatedAt:', order.updatedAt)
+                console.log('[OrderList] createDate:', order.createDate)
+                console.log('[OrderList] updateDate:', order.updateDate)
+              }
               allOrders.push(...response.data.content)
               
               // 마지막 페이지인지 확인
@@ -136,8 +152,20 @@ const OrderList = () => {
     return ordersData.data.filter((order) => {
       // 상태 필터
       if (statusFilter === 'DELIVERY') {
-        // 배송 중인 주문: CONFIRMED 상태이면서 fulfillmentType이 DELIVERY인 주문
-        if (order.status !== 'CONFIRMED' || order.fulfillmentType !== 'DELIVERY') {
+        // 배송 중인 주문: deliveryStatus가 DELIVERING인 주문
+        if (order.deliveryStatus !== 'DELIVERING') {
+          return false
+        }
+      } else if (statusFilter === 'PICKUP_WAITING') {
+        // 픽업대기: PICKUP이면서 CONFIRMED 상태
+        if (order.fulfillmentType !== 'PICKUP' || order.status !== 'CONFIRMED') {
+          return false
+        }
+      } else if (statusFilter === 'DELIVERY_READY') {
+        // 배송준비: DELIVERY이면서 (CONFIRMED 또는 PAID) 상태이고 deliveryStatus가 READY
+        if (order.fulfillmentType !== 'DELIVERY' || 
+            (order.status !== 'CONFIRMED' && order.status !== 'PAID') || 
+            order.deliveryStatus !== 'READY') {
           return false
         }
       } else if (statusFilter !== 'ALL' && order.status !== statusFilter) {
@@ -167,6 +195,33 @@ const OrderList = () => {
   const totalPages = Math.ceil(totalOrders / pageSize)
   const displayedOrders = filteredOrders.slice((currentPage - 1) * pageSize, currentPage * pageSize)
 
+  // 주문 통계 계산 (전체 주문 기준)
+  const orderStats = useMemo(() => {
+    if (!ordersData?.data) {
+      return {
+        total: 0,
+        waitingPayment: 0,
+        newOrder: 0,
+        pickupWaiting: 0,
+        deliveryReady: 0,
+        delivering: 0,
+        completed: 0,
+        canceled: 0,
+      }
+    }
+    const orders = ordersData.data
+    return {
+      total: orders.length,
+      waitingPayment: orders.filter((o) => o.status === 'CREATED').length,
+      newOrder: orders.filter((o) => o.status === 'PAID').length,
+      pickupWaiting: orders.filter((o) => o.fulfillmentType === 'PICKUP' && o.status === 'CONFIRMED').length,
+      deliveryReady: orders.filter((o) => o.fulfillmentType === 'DELIVERY' && (o.status === 'CONFIRMED' || o.status === 'PAID') && o.deliveryStatus === 'READY').length,
+      delivering: orders.filter((o) => o.deliveryStatus === 'DELIVERING').length,
+      completed: orders.filter((o) => o.status === 'COMPLETED').length,
+      canceled: orders.filter((o) => o.status === 'CANCELED').length,
+    }
+  }, [ordersData])
+
   // 필터가 변경되면 페이지를 1로 리셋
   useEffect(() => {
     setCurrentPage(1)
@@ -174,9 +229,14 @@ const OrderList = () => {
 
   // 결제 완료 처리 (CREATED → PAID)
   const markOrderPaidMutation = useMutation({
-    mutationFn: async ({ orderId, paymentMethod }: { orderId: number; paymentMethod: PaymentMethod }) => {
-      // 1. 결제 생성
-      const paymentResponse = await apiService.createPayment(orderId, { method: paymentMethod })
+    mutationFn: async ({ orderId }: { orderId: number; paymentMethod: PaymentMethod }) => {
+      // 1. 기존 결제 정보 조회 (주문 생성 시 자동 생성됨)
+      const paymentResponse = await apiService.getPaymentByOrder(orderId)
+      
+      if (!paymentResponse || !paymentResponse.data) {
+        throw new Error('결제 정보를 찾을 수 없습니다. 주문이 정상적으로 생성되었는지 확인해주세요.')
+      }
+      
       // 2. 결제 완료 처리 (주문도 PAID로 전이)
       await apiService.markPaymentPaid(paymentResponse.data.paymentId, { pgPaymentKey: 'MANUAL_ADMIN' })
       return paymentResponse
@@ -459,18 +519,213 @@ const OrderList = () => {
     return method === 'BANK_TRANSFER' ? '무통장 입금' : method === 'CARD' ? '카드' : '-'
   }
 
+  // 전화번호 포맷팅 (010-1234-5678 형식)
+  const formatPhoneNumber = (phone?: string) => {
+    if (!phone) return '-'
+    const cleaned = phone.replace(/\D/g, '')
+    if (cleaned.length === 11) {
+      return `${cleaned.slice(0, 3)}-${cleaned.slice(3, 7)}-${cleaned.slice(7)}`
+    } else if (cleaned.length === 10) {
+      return `${cleaned.slice(0, 3)}-${cleaned.slice(3, 6)}-${cleaned.slice(6)}`
+    }
+    return phone
+  }
+
+  // 체크된 주문 엑셀 다운로드
+  // 주소에서 공동현관/입구비번 분리
+  const extractEntranceCode = (address: string) => {
+    // 공동현관, 입구비번, 비밀번호 등의 패턴 찾기
+    const patterns = [
+      /공동현관[:\s]*([#\d\*]+)/i,
+      /입구비번[:\s]*([#\d\*]+)/i,
+      /비밀번호[:\s]*([#\d\*]+)/i,
+      /현관[:\s]*([#\d\*]+)/i,
+      /#(\d+#?)/,
+    ]
+    
+    for (const pattern of patterns) {
+      const match = address.match(pattern)
+      if (match) {
+        const code = match[0]
+        const cleanedAddress = address.replace(code, '').trim()
+        return { address: cleanedAddress, entranceCode: match[1] || code }
+      }
+    }
+    
+    return { address, entranceCode: '' }
+  }
+
+  const handleExportToExcel = () => {
+    if (selectedRowKeys.length === 0) {
+      message.warning('다운로드할 주문을 선택해주세요.')
+      return
+    }
+
+    const selectedOrders = filteredOrders.filter(order => selectedRowKeys.includes(order.orderId))
+    
+    if (selectedOrders.length === 0) {
+      message.warning('다운로드할 주문 데이터가 없습니다.')
+      return
+    }
+
+    // 엑셀 데이터 준비 - 상품별로 한 줄씩
+    const excelData: any[] = []
+    
+    selectedOrders.forEach((order) => {
+      const items = order.items || []
+      
+      // 주소 합치기 + 공동현관 분리
+      const fullAddress = `${order.address1 || ''} ${order.address2 || ''}`.trim()
+      const { address: cleanAddress, entranceCode } = extractEntranceCode(fullAddress)
+      
+      if (items.length === 0) {
+        // 상품이 없는 경우 주문 정보만 출력
+        excelData.push({
+          '이름': order.recipientName || '-',
+          '전화번호': formatPhoneNumber(order.recipientPhone),
+          '상품명': '-',
+          '수량': 0,
+          '단가': 0,
+          '금액': order.finalAmount || 0,
+          '배송지주소': cleanAddress || '-',
+          '공동현관/입구비번': entranceCode || '-',
+          '매입가': '-',
+          '닉네임': order.recipientName || '-',
+          '결제수단': getPaymentMethodText(order.paymentMethod),
+        })
+      } else {
+        // 각 상품마다 한 줄씩 출력
+        items.forEach((item, index) => {
+          excelData.push({
+            '이름': order.recipientName || '-',
+            '전화번호': formatPhoneNumber(order.recipientPhone),
+            '상품명': item.productName || '-',
+            '수량': item.quantity || 0,
+            '단가': item.unitPrice || 0,
+            '금액': index === 0 ? (order.finalAmount || 0) : '', // 첫 번째 상품에만 총액 표시
+            '배송지주소': index === 0 ? (cleanAddress || '-') : '', // 첫 번째 상품에만 주소 표시
+            '공동현관/입구비번': index === 0 ? (entranceCode || '-') : '',
+            '매입가': (item as any).purchasePrice || '-',
+            '닉네임': order.recipientName || '-',
+            '결제수단': index === 0 ? getPaymentMethodText(order.paymentMethod) : '',
+          })
+        })
+      }
+    })
+
+    // 워크북 생성
+    const wb = XLSX.utils.book_new()
+    const ws = XLSX.utils.json_to_sheet(excelData)
+    
+    // 컬럼 너비 설정
+    ws['!cols'] = [
+      { wch: 12 },  // 이름
+      { wch: 15 },  // 전화번호
+      { wch: 40 },  // 상품명
+      { wch: 8 },   // 수량
+      { wch: 12 },  // 단가
+      { wch: 12 },  // 금액
+      { wch: 50 },  // 배송지주소
+      { wch: 20 },  // 공동현관/입구비번
+      { wch: 10 },  // 매입가
+      { wch: 12 },  // 닉네임
+      { wch: 12 },  // 결제수단
+    ]
+
+    XLSX.utils.book_append_sheet(wb, ws, '주문목록')
+
+    // 파일 다운로드
+    const fileName = `주문목록_${new Date().toISOString().split('T')[0]}.xlsx`
+    XLSX.writeFile(wb, fileName)
+
+    message.success(`${selectedOrders.length}건의 주문이 다운로드되었습니다.`)
+    setSelectedRowKeys([]) // 선택 초기화
+  }
+
+  // 테이블 체크박스 설정
+  const rowSelection = {
+    selectedRowKeys,
+    onChange: (newSelectedRowKeys: React.Key[]) => {
+      setSelectedRowKeys(newSelectedRowKeys)
+    },
+  }
+
   const columns = [
     {
       title: '주문 ID',
-      dataIndex: 'orderId',
       key: 'orderId',
       width: 100,
+      render: (_: any, record: OrderResponse) => (
+        <Space direction="vertical" size={0}>
+          <Typography.Text strong>{record.orderId}</Typography.Text>
+          <Typography.Link 
+            style={{ fontSize: 11 }}
+            onClick={(e) => {
+              e.stopPropagation()
+              navigate(`/orders/${record.orderId}`)
+            }}
+          >
+            상세보기
+          </Typography.Link>
+        </Space>
+      ),
     },
     {
       title: '주문번호',
-      dataIndex: 'orderNo',
       key: 'orderNo',
       width: 180,
+      render: (_: any, record: any) => {
+        // 다양한 필드명 체크: createdAt, updatedAt, createDate, updateDate
+        const timestamp = record.createdAt || record.createDate || record.updatedAt || record.updateDate
+        
+        const formatDateTime = (dateStr: string) => {
+          const date = new Date(dateStr)
+          return date.toLocaleString('ko-KR', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+          })
+        }
+        
+        // 주문번호에서 날짜 추출 (예: OD-20260107-7F3A2C → 2026.01.07)
+        const extractDateFromOrderNo = (orderNo: string) => {
+          const match = orderNo?.match(/OD-(\d{4})(\d{2})(\d{2})-/)
+          if (match) {
+            return `${match[1]}. ${match[2]}. ${match[3]}.`
+          }
+          return null
+        }
+        
+        const displayDate = timestamp 
+          ? formatDateTime(timestamp)
+          : extractDateFromOrderNo(record.orderNo)
+        
+        return (
+          <Space direction="vertical" size={0}>
+            <Typography.Text strong>{record.orderNo}</Typography.Text>
+            {displayDate && (
+              <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                {displayDate}
+              </Typography.Text>
+            )}
+          </Space>
+        )
+      },
+    },
+    {
+      title: '주문자',
+      key: 'customer',
+      width: 150,
+      render: (_: any, record: OrderResponse) => (
+        <Space direction="vertical" size={0}>
+          <Typography.Text strong>{record.recipientName || '-'}</Typography.Text>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {formatPhoneNumber(record.recipientPhone)}
+          </Typography.Text>
+        </Space>
+      ),
     },
     {
       title: '상태',
@@ -542,19 +797,23 @@ const OrderList = () => {
       ),
     },
     {
-      title: '결제 정보',
+      title: '결제 방식',
       key: 'payment',
       width: 150,
-      render: (_: any, record: OrderResponse & { paymentMethod?: PaymentMethod }) => {
-        if (record.paymentMethod) {
-          return (
+      render: (_: any, record: OrderResponse & { paymentMethod?: PaymentMethod }) => (
+        <Space direction="vertical" size={2} align="center">
+          <Typography.Text strong style={{ color: '#1890ff' }}>
+            {formatCurrency(record.finalAmount)}
+          </Typography.Text>
+          {record.paymentMethod ? (
             <Tag color={record.paymentMethod === 'BANK_TRANSFER' ? 'blue' : 'green'}>
               {getPaymentMethodText(record.paymentMethod)}
             </Tag>
-          )
-        }
-        return <Tag color="default">미결제</Tag>
-      },
+          ) : (
+            <Tag color="default">미결제</Tag>
+          )}
+        </Space>
+      ),
     },
     {
       title: '현금영수증',
@@ -580,14 +839,22 @@ const OrderList = () => {
     {
       title: '상품',
       key: 'items',
-      width: 200,
+      width: 280,
       render: (_: any, record: OrderResponse) => {
         if (record.items && record.items.length > 0) {
           return (
-            <span>
-              {record.items[0].productName}
-              {record.items.length > 1 && ` 외 ${record.items.length - 1}개`}
-            </span>
+            <Space direction="vertical" size={2} style={{ width: '100%' }}>
+              {record.items.map((item, idx) => (
+                <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                  <Typography.Text ellipsis style={{ maxWidth: 180 }}>
+                    {item.productName}
+                  </Typography.Text>
+                  <Typography.Text type="secondary" style={{ marginLeft: 8 }}>
+                    x{item.quantity}
+                  </Typography.Text>
+                </div>
+              ))}
+            </Space>
           )
         }
         return '-'
@@ -663,29 +930,142 @@ const OrderList = () => {
 
   return (
     <div>
-      <Space 
-        direction="vertical" 
-        size="middle" 
-        style={{ marginBottom: 24, width: '100%' }}
+      {/* 주문 통계 테이블 */}
+      <Card 
+        title={<span style={{ fontWeight: 600 }}>전체주문관리</span>}
+        style={{ marginBottom: 24 }}
+        styles={{
+          header: {
+            borderBottom: '2px solid #000',
+          }
+        }}
+        extra={
+          <Space>
+            <Button 
+              icon={<DownloadOutlined />} 
+              onClick={handleExportToExcel}
+              disabled={selectedRowKeys.length === 0}
+            >
+              엑셀 다운로드 {selectedRowKeys.length > 0 && `(${selectedRowKeys.length}건)`}
+            </Button>
+            <Button 
+              icon={<ReloadOutlined />} 
+              onClick={() => {
+                queryClient.invalidateQueries({ queryKey: ['allOrders'] })
+                queryClient.invalidateQueries({ queryKey: ['order'] })
+                queryClient.invalidateQueries({ queryKey: ['paymentByOrder'] })
+                queryClient.refetchQueries({ queryKey: ['allOrders'] })
+                refetch()
+              }} 
+              loading={isLoading}
+            >
+              새로고침
+            </Button>
+          </Space>
+        }
       >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-          <Title level={2} style={{ margin: 0 }}>주문 관리</Title>
-          <Button 
-            icon={<ReloadOutlined />} 
-            onClick={() => {
-              // 모든 관련 쿼리 무효화 후 강제로 다시 불러오기
-              queryClient.invalidateQueries({ queryKey: ['allOrders'] })
-              queryClient.invalidateQueries({ queryKey: ['order'] })
-              queryClient.invalidateQueries({ queryKey: ['paymentByOrder'] })
-              queryClient.refetchQueries({ queryKey: ['allOrders'] })
-              refetch()
-            }} 
-            loading={isLoading}
-          >
-            새로고침
-          </Button>
-        </div>
-      </Space>
+        <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'center' }}>
+          <thead>
+            <tr style={{ borderBottom: '1px solid #d9d9d9' }}>
+              <th style={{ padding: '12px 8px', fontWeight: 600, fontSize: 14 }}>총 주문</th>
+              <th 
+                style={{ padding: '12px 8px', fontWeight: 600, fontSize: 14, cursor: 'pointer', color: '#1890ff' }}
+                onClick={() => setActiveTab('CREATED')}
+              >
+                입금대기
+              </th>
+              <th 
+                style={{ padding: '12px 8px', fontWeight: 600, fontSize: 14, cursor: 'pointer', color: '#52c41a' }}
+                onClick={() => setActiveTab('PAID')}
+              >
+                신규주문
+              </th>
+              <th 
+                style={{ padding: '12px 8px', fontWeight: 600, fontSize: 14, cursor: 'pointer', color: '#722ed1' }}
+                onClick={() => setActiveTab('PICKUP_WAITING')}
+              >
+                픽업대기
+              </th>
+              <th 
+                style={{ padding: '12px 8px', fontWeight: 600, fontSize: 14, cursor: 'pointer', color: '#13c2c2' }}
+                onClick={() => setActiveTab('DELIVERY_READY')}
+              >
+                배송준비
+              </th>
+              <th 
+                style={{ padding: '12px 8px', fontWeight: 600, fontSize: 14, cursor: 'pointer', color: '#fa8c16' }}
+                onClick={() => setActiveTab('DELIVERY')}
+              >
+                배송중
+              </th>
+              <th 
+                style={{ padding: '12px 8px', fontWeight: 600, fontSize: 14, cursor: 'pointer', color: '#52c41a' }}
+                onClick={() => setActiveTab('COMPLETED')}
+              >
+                완료
+              </th>
+              <th 
+                style={{ padding: '12px 8px', fontWeight: 600, fontSize: 14, cursor: 'pointer', color: '#ff4d4f' }}
+                onClick={() => setActiveTab('CANCELED')}
+              >
+                취소
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td 
+                style={{ padding: '16px 8px', fontSize: 20, fontWeight: 700, cursor: 'pointer' }}
+                onClick={() => setActiveTab('ALL')}
+              >
+                {orderStats.total}
+              </td>
+              <td 
+                style={{ padding: '16px 8px', fontSize: 20, fontWeight: 700, cursor: 'pointer', color: '#1890ff' }}
+                onClick={() => setActiveTab('CREATED')}
+              >
+                {orderStats.waitingPayment}
+              </td>
+              <td 
+                style={{ padding: '16px 8px', fontSize: 20, fontWeight: 700, cursor: 'pointer', color: '#52c41a' }}
+                onClick={() => setActiveTab('PAID')}
+              >
+                {orderStats.newOrder}
+              </td>
+              <td 
+                style={{ padding: '16px 8px', fontSize: 20, fontWeight: 700, cursor: 'pointer', color: '#722ed1' }}
+                onClick={() => setActiveTab('PICKUP_WAITING')}
+              >
+                {orderStats.pickupWaiting}
+              </td>
+              <td 
+                style={{ padding: '16px 8px', fontSize: 20, fontWeight: 700, cursor: 'pointer', color: '#13c2c2' }}
+                onClick={() => setActiveTab('DELIVERY_READY')}
+              >
+                {orderStats.deliveryReady}
+              </td>
+              <td 
+                style={{ padding: '16px 8px', fontSize: 20, fontWeight: 700, cursor: 'pointer', color: '#fa8c16' }}
+                onClick={() => setActiveTab('DELIVERY')}
+              >
+                {orderStats.delivering}
+              </td>
+              <td 
+                style={{ padding: '16px 8px', fontSize: 20, fontWeight: 700, cursor: 'pointer', color: '#52c41a' }}
+                onClick={() => setActiveTab('COMPLETED')}
+              >
+                {orderStats.completed}
+              </td>
+              <td 
+                style={{ padding: '16px 8px', fontSize: 20, fontWeight: 700, cursor: 'pointer', color: '#ff4d4f' }}
+                onClick={() => setActiveTab('CANCELED')}
+              >
+                {orderStats.canceled}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </Card>
       
       {/* 탭 섹션 */}
       <Card style={{ marginBottom: 24 }}>
@@ -697,38 +1077,43 @@ const OrderList = () => {
           }}
           items={[
             {
-              key: 'PAID',
-              label: '결제완료',
-              children: null,
-            },
-            {
-              key: 'CONFIRMED',
-              label: '주문확인',
-              children: null,
-            },
-            {
-              key: 'DELIVERY',
-              label: '배송중',
-              children: null,
-            },
-            {
-              key: 'COMPLETED',
-              label: '완료',
-              children: null,
-            },
-            {
               key: 'ALL',
-              label: '전체',
+              label: `전체 (${orderStats.total})`,
               children: null,
             },
             {
               key: 'CREATED',
-              label: '생성됨',
+              label: `입금대기 (${orderStats.waitingPayment})`,
+              children: null,
+            },
+            {
+              key: 'PAID',
+              label: `신규주문 (${orderStats.newOrder})`,
+              children: null,
+            },
+            {
+              key: 'PICKUP_WAITING',
+              label: `픽업대기 (${orderStats.pickupWaiting})`,
+              children: null,
+            },
+            {
+              key: 'DELIVERY_READY',
+              label: `배송준비 (${orderStats.deliveryReady})`,
+              children: null,
+            },
+            {
+              key: 'DELIVERY',
+              label: `배송중 (${orderStats.delivering})`,
+              children: null,
+            },
+            {
+              key: 'COMPLETED',
+              label: `완료 (${orderStats.completed})`,
               children: null,
             },
             {
               key: 'CANCELED',
-              label: '취소',
+              label: `취소 (${orderStats.canceled})`,
               children: null,
             },
           ]}
@@ -839,6 +1224,11 @@ const OrderList = () => {
             dataSource={displayedOrders}
             rowKey="orderId"
             loading={isLoading}
+            rowSelection={rowSelection}
+            onRow={(record) => ({
+              onClick: () => navigate(`/orders/${record.orderId}`),
+              style: { cursor: 'pointer' },
+            })}
             pagination={{
               current: currentPage,
               pageSize: pageSize,

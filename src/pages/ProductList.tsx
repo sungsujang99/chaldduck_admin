@@ -18,7 +18,24 @@ import {
   Select,
   Collapse,
 } from 'antd'
-import { PlusOutlined, ReloadOutlined, DeleteOutlined, GiftOutlined, ExclamationCircleOutlined, OrderedListOutlined, ArrowUpOutlined, ArrowDownOutlined } from '@ant-design/icons'
+import { PlusOutlined, ReloadOutlined, DeleteOutlined, GiftOutlined, ExclamationCircleOutlined, OrderedListOutlined, HolderOutlined } from '@ant-design/icons'
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent,
+} from '@dnd-kit/core'
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 import { Dayjs } from 'dayjs'
 import { apiService } from '@/services/api'
 import type { 
@@ -83,6 +100,71 @@ const saveCategories = (categories: CategoryInfo[]) => {
 const getCategoryInfo = (categoryValue?: string, categories?: CategoryInfo[]): CategoryInfo | undefined => {
   const cats = categories || DEFAULT_CATEGORIES
   return cats.find(c => c.value === categoryValue)
+}
+
+// 드래그 가능한 상품 아이템 컴포넌트
+interface SortableProductItemProps {
+  product: AdminProductStockRow
+  index: number
+  categories: CategoryInfo[]
+}
+
+const SortableProductItem = ({ product, index, categories }: SortableProductItemProps) => {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: product.productId })
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  }
+
+  const formatCurrency = (value: number) => {
+    return new Intl.NumberFormat('ko-KR', { style: 'currency', currency: 'KRW' }).format(value)
+  }
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        ...style,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '12px 16px',
+        marginBottom: 8,
+        border: isDragging ? '2px solid #1890ff' : '1px solid #d9d9d9',
+        borderRadius: 8,
+        backgroundColor: isDragging ? '#e6f7ff' : (index % 2 === 0 ? '#fafafa' : '#fff'),
+        cursor: 'grab',
+        boxShadow: isDragging ? '0 4px 12px rgba(0,0,0,0.15)' : 'none',
+      }}
+      {...attributes}
+      {...listeners}
+    >
+      <Space size="middle">
+        <HolderOutlined style={{ color: '#999', fontSize: 16 }} />
+        <Tag color="blue" style={{ minWidth: 32, textAlign: 'center', fontWeight: 'bold' }}>
+          {index + 1}
+        </Tag>
+        <Typography.Text strong style={{ fontSize: 14 }}>{product.name}</Typography.Text>
+        {product.category && (
+          <Tag color={getCategoryInfo(product.category, categories)?.color}>
+            {getCategoryInfo(product.category, categories)?.label}
+          </Tag>
+        )}
+      </Space>
+      <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+        {formatCurrency(product.price)}
+      </Typography.Text>
+    </div>
+  )
 }
 
 const ProductList = () => {
@@ -544,6 +626,14 @@ const ProductList = () => {
     setIsModalOpen(true)
   }
 
+  // 드래그 앤 드롭 센서 설정
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  )
+
   // 상품 순서 변경 모달 열기
   const handleOpenReorderModal = () => {
     // sortOrder 기준으로 정렬된 상품 목록 복사
@@ -552,24 +642,15 @@ const ProductList = () => {
     setIsReorderModalOpen(true)
   }
 
-  // 상품 순서 위로 이동
-  const handleMoveUp = (index: number) => {
-    if (index === 0) return
-    const newList = [...reorderList]
-    const temp = newList[index - 1]
-    newList[index - 1] = newList[index]
-    newList[index] = temp
-    setReorderList(newList)
-  }
-
-  // 상품 순서 아래로 이동
-  const handleMoveDown = (index: number) => {
-    if (index === reorderList.length - 1) return
-    const newList = [...reorderList]
-    const temp = newList[index + 1]
-    newList[index + 1] = newList[index]
-    newList[index] = temp
-    setReorderList(newList)
+  // 드래그 앤 드롭 완료 핸들러
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event
+    
+    if (over && active.id !== over.id) {
+      const oldIndex = reorderList.findIndex(item => item.productId === active.id)
+      const newIndex = reorderList.findIndex(item => item.productId === over.id)
+      setReorderList(arrayMove(reorderList, oldIndex, newIndex))
+    }
   }
 
   // 상품 순서 저장
@@ -1029,6 +1110,9 @@ const ProductList = () => {
             // 해당 상품에 연결된 할인 룰 가져오기
             const productDiscountRules = getProductDiscounts[productId] || []
             
+            // 기존 sortOrder 저장 (순서 유지용)
+            const originalSortOrder = currentProduct.sortOrder
+            
             // 바로 실행 (확인 없이)
             ;(async () => {
               try {
@@ -1091,6 +1175,29 @@ const ProductList = () => {
                       await apiService.createDiscountRule(newRuleData)
                     }
                   }
+                }
+                
+                // 6. sortOrder 복원 - 전체 상품 목록 다시 가져와서 순서 재설정
+                if (newProductId && originalSortOrder !== undefined) {
+                  const productsResponse = await apiService.getProducts()
+                  const allProducts = productsResponse.data || []
+                  
+                  // 기존 순서대로 정렬 (새 상품은 원래 위치에 삽입)
+                  const sortedProducts = allProducts
+                    .filter(p => p.active !== false)
+                    .sort((a, b) => {
+                      const aOrder = a.productId === newProductId ? originalSortOrder : (a.sortOrder ?? 999)
+                      const bOrder = b.productId === newProductId ? originalSortOrder : (b.sortOrder ?? 999)
+                      return aOrder - bOrder
+                    })
+                  
+                  // reorderProducts API 호출
+                  const reorderItems = sortedProducts.map((p, index) => ({
+                    productId: p.productId,
+                    sortOrder: index + 1,
+                  }))
+                  
+                  await apiService.reorderProducts({ items: reorderItems })
                 }
                 
                 message.success({ content: '매입가가 수정되었습니다.', key: 'purchasePrice' })
@@ -1302,12 +1409,14 @@ const ProductList = () => {
       dataIndex: 'productId',
       key: 'productId',
       width: 100,
+      fixed: 'left' as const,
     },
     {
       title: '상품명',
       dataIndex: 'name',
       key: 'name',
       width: 200,
+      fixed: 'left' as const,
     },
     {
       title: (
@@ -2658,61 +2767,38 @@ WHERE category IS NULL OR tax_type IS NULL;`}
         cancelText="취소"
       >
         <div style={{ marginBottom: 16 }}>
-          <Typography.Text type="secondary">
-            상품을 위/아래 버튼으로 이동하여 전시 순서를 변경하세요. 위에 있는 상품이 먼저 표시됩니다.
-          </Typography.Text>
+          <Space direction="vertical" size={4}>
+            <Typography.Text type="secondary">
+              <HolderOutlined style={{ marginRight: 8 }} />
+              상품을 드래그하여 순서를 변경하세요. 위에 있는 상품이 먼저 표시됩니다.
+            </Typography.Text>
+          </Space>
         </div>
-        <div style={{ maxHeight: 400, overflowY: 'auto' }}>
-          {reorderList.map((product, index) => (
-            <div
-              key={product.productId}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                padding: '8px 12px',
-                marginBottom: 8,
-                border: '1px solid #d9d9d9',
-                borderRadius: 6,
-                backgroundColor: index % 2 === 0 ? '#fafafa' : '#fff',
-              }}
+        <div style={{ maxHeight: 450, overflowY: 'auto', padding: '4px' }}>
+          {reorderList.length > 0 ? (
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              onDragEnd={handleDragEnd}
             >
-              <Space>
-                <Tag color="blue" style={{ minWidth: 32, textAlign: 'center' }}>
-                  {index + 1}
-                </Tag>
-                <Typography.Text strong>{product.name}</Typography.Text>
-                {product.category && (
-                  <Tag color={getCategoryInfo(product.category, categories)?.color}>
-                    {getCategoryInfo(product.category, categories)?.label}
-                  </Tag>
-                )}
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  {formatCurrency(product.price)}
-                </Typography.Text>
-              </Space>
-              <Space>
-                <Button
-                  type="text"
-                  icon={<ArrowUpOutlined />}
-                  onClick={() => handleMoveUp(index)}
-                  disabled={index === 0}
-                  size="small"
-                />
-                <Button
-                  type="text"
-                  icon={<ArrowDownOutlined />}
-                  onClick={() => handleMoveDown(index)}
-                  disabled={index === reorderList.length - 1}
-                  size="small"
-                />
-              </Space>
-            </div>
-          ))}
+              <SortableContext
+                items={reorderList.map(p => p.productId)}
+                strategy={verticalListSortingStrategy}
+              >
+                {reorderList.map((product, index) => (
+                  <SortableProductItem
+                    key={product.productId}
+                    product={product}
+                    index={index}
+                    categories={categories}
+                  />
+                ))}
+              </SortableContext>
+            </DndContext>
+          ) : (
+            <Typography.Text type="secondary">표시할 상품이 없습니다.</Typography.Text>
+          )}
         </div>
-        {reorderList.length === 0 && (
-          <Typography.Text type="secondary">표시할 상품이 없습니다.</Typography.Text>
-        )}
       </Modal>
     </div>
   )

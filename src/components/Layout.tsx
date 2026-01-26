@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Layout as AntLayout, Menu, theme, Button } from 'antd'
+import { Layout as AntLayout, Menu, theme, Button, Dropdown, Avatar } from 'antd'
 import { useNavigate, useLocation } from 'react-router-dom'
 import {
   DashboardOutlined,
@@ -9,6 +9,7 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   SettingOutlined,
+  LogoutOutlined,
 } from '@ant-design/icons'
 import type { MenuProps } from 'antd'
 
@@ -16,9 +17,10 @@ const { Header, Sider, Content } = AntLayout
 
 interface LayoutProps {
   children: React.ReactNode
+  onLogout: () => void
 }
 
-const Layout = ({ children }: LayoutProps) => {
+const Layout = ({ children, onLogout }: LayoutProps) => {
   const [collapsed, setCollapsed] = useState(false)
   const [isMobile, setIsMobile] = useState(false)
   const navigate = useNavigate()
@@ -171,6 +173,44 @@ const Layout = ({ children }: LayoutProps) => {
               관리자 대시보드
             </span>
           </div>
+          <Dropdown
+            menu={{
+              items: [
+                {
+                  key: 'logout',
+                  icon: <LogoutOutlined />,
+                  label: '로그아웃',
+                  onClick: onLogout,
+                },
+              ],
+            }}
+            placement="bottomRight"
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                cursor: 'pointer',
+                padding: '4px 8px',
+                borderRadius: 8,
+                transition: 'background 0.2s',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = '#f5f5f5')}
+              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+            >
+              <Avatar
+                size={32}
+                style={{
+                  background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                }}
+                icon={<UserOutlined />}
+              />
+              {!isMobile && (
+                <span style={{ fontWeight: 500 }}>Admin</span>
+              )}
+            </div>
+          </Dropdown>
         </Header>
         <Content
           style={{

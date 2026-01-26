@@ -1,11 +1,11 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Card, Table, Space, Typography, Button, Modal, Form, Input, message, Tag, Switch } from 'antd'
 import { EyeOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, DownloadOutlined, StopOutlined } from '@ant-design/icons'
 import * as XLSX from 'xlsx'
 import { useNavigate } from 'react-router-dom'
 import { apiService } from '@/services/api'
-import type { CustomerUpsertRequest, CustomerListResponse, CustomerBlockUpdateRequest } from '@/types/api'
+import type { CustomerUpsertRequest, CustomerListResponse, CustomerBlockUpdateRequest, OrderResponse } from '@/types/api'
 
 const { Title } = Typography
 
@@ -24,34 +24,69 @@ const CustomerList = () => {
   const [currentPage, setCurrentPage] = useState(1)
   const pageSize = 10
 
-  // 고객 리스트 조회 (서버 사이드 페이지네이션 사용)
+  // 고객 리스트 조회 (검색 시 전체 조회, 아닐 때는 페이지네이션)
   const { data: customersData, isLoading, refetch } = useQuery({
     queryKey: ['customers', currentPage, searchPhone],
     queryFn: async () => {
-      console.log(`[CustomerList] 고객 리스트 조회 시작 (페이지 ${currentPage})`);
+      console.log(`[CustomerList] 고객 리스트 조회 시작 (페이지 ${currentPage}, 검색어: "${searchPhone}")`);
       try {
-        const response = await apiService.getAllCustomersAdmin({ page: currentPage - 1, size: pageSize });
-        console.log('[CustomerList] 고객 리스트 조회 성공:', response);
-        
-        if (response.data && response.data.content) {
-          // 전화번호 검색 필터링 (클라이언트 사이드)
-          let filteredContent = response.data.content;
-          if (searchPhone.trim()) {
-            const searchLower = searchPhone.trim().toLowerCase().replace(/[-\s]/g, '');
-            filteredContent = response.data.content.filter((customer: CustomerListResponse) => {
-              const phoneLower = customer.phone.toLowerCase().replace(/[-\s]/g, '');
-              return phoneLower.includes(searchLower);
-            });
+        // 검색어가 있으면 전체 고객 조회 후 필터링
+        if (searchPhone.trim()) {
+          console.log('[CustomerList] 검색 모드 - 전체 고객 조회');
+          const allCustomers: CustomerListResponse[] = [];
+          let page = 0;
+          let hasMore = true;
+          
+          while (hasMore) {
+            const response = await apiService.getAllCustomersAdmin({ page, size: 100 });
+            if (response.data && response.data.content && response.data.content.length > 0) {
+              allCustomers.push(...response.data.content);
+              page++;
+              if (response.data.content.length < 100 || allCustomers.length >= response.data.totalElements) {
+                hasMore = false;
+              }
+            } else {
+              hasMore = false;
+            }
           }
+          
+          console.log(`[CustomerList] 전체 고객 ${allCustomers.length}명 조회 완료`);
+          
+          // 전화번호 또는 이름으로 검색
+          const searchLower = searchPhone.trim().toLowerCase().replace(/[-\s]/g, '');
+          const filteredContent = allCustomers.filter((customer: CustomerListResponse) => {
+            const phoneLower = customer.phone.toLowerCase().replace(/[-\s]/g, '');
+            const nameLower = customer.name.toLowerCase();
+            return phoneLower.includes(searchLower) || nameLower.includes(searchLower);
+          });
+          
+          console.log(`[CustomerList] 검색 결과: ${filteredContent.length}명`);
+          
+          // 클라이언트 사이드 페이지네이션
+          const startIdx = (currentPage - 1) * pageSize;
+          const paginatedData = filteredContent.slice(startIdx, startIdx + pageSize);
           
           return { 
             status: 200, 
             message: 'OK', 
-            data: filteredContent,
-            total: searchPhone.trim() ? filteredContent.length : response.data.totalElements,
-            totalPages: searchPhone.trim() 
-              ? Math.ceil(filteredContent.length / pageSize)
-              : response.data.totalPages,
+            data: paginatedData,
+            total: filteredContent.length,
+            totalPages: Math.ceil(filteredContent.length / pageSize),
+            serverTotal: allCustomers.length,
+          };
+        }
+        
+        // 검색어가 없으면 서버 페이지네이션 사용
+        const response = await apiService.getAllCustomersAdmin({ page: currentPage - 1, size: pageSize });
+        console.log('[CustomerList] 고객 리스트 조회 성공:', response);
+        
+        if (response.data && response.data.content) {
+          return { 
+            status: 200, 
+            message: 'OK', 
+            data: response.data.content,
+            total: response.data.totalElements,
+            totalPages: response.data.totalPages,
             serverTotal: response.data.totalElements,
           };
         }
@@ -64,6 +99,71 @@ const CustomerList = () => {
     },
     retry: false,
   })
+
+  // 전체 주문 데이터 조회 (고객별 총 금액 계산용)
+  const { data: ordersData, isLoading: isLoadingOrders } = useQuery({
+    queryKey: ['allOrdersForCustomerStats'],
+    queryFn: async () => {
+      console.log('[CustomerList] 전체 주문 조회 시작 (고객별 총 금액 계산용)');
+      const allOrders: OrderResponse[] = [];
+      let page = 0;
+      let hasMore = true;
+
+      while (hasMore) {
+        try {
+          const response = await apiService.getAllOrdersAdmin({ page, size: 100 });
+          if (response.data && response.data.content && response.data.content.length > 0) {
+            allOrders.push(...response.data.content);
+            if (response.data.last || response.data.content.length < 100) {
+              hasMore = false;
+            } else {
+              page++;
+            }
+          } else {
+            hasMore = false;
+          }
+        } catch (err: any) {
+          console.error(`[CustomerList] 주문 조회 실패 (페이지 ${page}):`, err.message);
+          hasMore = false;
+        }
+      }
+
+      console.log(`[CustomerList] 전체 주문 ${allOrders.length}개 조회 완료`);
+      return allOrders;
+    },
+    staleTime: 1000 * 60 * 5, // 5분간 캐시
+  })
+
+  // 고객별 총 사용 금액 계산 (취소된 주문 제외)
+  const customerTotalAmounts = useMemo(() => {
+    if (!ordersData) return {};
+    
+    const totals: Record<number, number> = {};
+    ordersData.forEach((order) => {
+      // 취소된 주문은 제외
+      if (order.status === 'CANCELED') return;
+      
+      const customerId = order.customerId;
+      if (!totals[customerId]) {
+        totals[customerId] = 0;
+      }
+      totals[customerId] += order.finalAmount || 0;
+    });
+    
+    return totals;
+  }, [ordersData])
+
+  // 전화번호 포맷팅 (010-1234-5678 형식)
+  const formatPhoneNumber = (phone?: string) => {
+    if (!phone) return '-'
+    const cleaned = phone.replace(/\D/g, '')
+    if (cleaned.length === 11) {
+      return `${cleaned.slice(0, 3)}-${cleaned.slice(3, 7)}-${cleaned.slice(7)}`
+    } else if (cleaned.length === 10) {
+      return `${cleaned.slice(0, 3)}-${cleaned.slice(3, 6)}-${cleaned.slice(6)}`
+    }
+    return phone
+  }
 
   const createCustomerMutation = useMutation({
     mutationFn: (data: CustomerUpsertRequest) => apiService.identifyCustomer(data),
@@ -183,10 +283,12 @@ const CustomerList = () => {
       // 엑셀 데이터 준비
       const excelData = customersToExport.map((customer) => {
         const isBlocked = customer.blockInfo?.blocked === true
+        const totalAmount = customerTotalAmounts[customer.customerId] || 0
         return {
           '고객 ID': customer.customerId,
           '이름': customer.name,
           '전화번호': customer.phone,
+          '총 사용 금액': totalAmount,
           '차단 여부': isBlocked ? '차단' : '정상',
           '차단 사유': customer.blockInfo?.blockedReason || '',
           '차단 일시': customer.blockInfo?.blockedAt || '',
@@ -239,6 +341,20 @@ const CustomerList = () => {
       title: '전화번호',
       dataIndex: 'phone',
       key: 'phone',
+      render: (phone: string) => formatPhoneNumber(phone),
+    },
+    {
+      title: '총 사용 금액',
+      key: 'totalAmount',
+      width: 150,
+      render: (_: any, record: CustomerListResponse) => {
+        const amount = customerTotalAmounts[record.customerId] || 0;
+        return (
+          <Typography.Text strong style={{ color: amount > 0 ? '#1890ff' : undefined }}>
+            {amount.toLocaleString()}원
+          </Typography.Text>
+        );
+      },
     },
     {
       title: '차단 상태',
@@ -315,7 +431,7 @@ const CustomerList = () => {
           </Space>
         </div>
         <Input
-          placeholder="전화번호로 검색 (예: 010-1234-5678 또는 01012345678)"
+          placeholder="이름 또는 전화번호로 검색"
           prefix={<SearchOutlined />}
           value={searchPhone}
           onChange={(e) => {
@@ -355,7 +471,7 @@ const CustomerList = () => {
             columns={columns}
             dataSource={displayedCustomers}
             rowKey="customerId"
-            loading={isLoading}
+            loading={isLoading || isLoadingOrders}
             pagination={{
               current: currentPage,
               pageSize: pageSize,
@@ -366,7 +482,7 @@ const CustomerList = () => {
             scroll={{ x: 'max-content' }}
             locale={{
               emptyText: searchPhone.trim() 
-                ? `"${searchPhone}"로 검색된 고객이 없습니다.`
+                ? `"${searchPhone}" 검색 결과가 없습니다.`
                 : '고객 데이터가 없습니다. "고객 추가" 버튼을 클릭하여 고객을 등록해주세요.',
             }}
           />

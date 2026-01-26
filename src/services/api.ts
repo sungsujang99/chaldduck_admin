@@ -656,7 +656,7 @@ class ApiService {
       policyId: { value: data.policyId, type: typeof data.policyId, isNumber: typeof data.policyId === 'number' },
       type: { value: data.type, type: typeof data.type },
       label: { value: data.label, type: typeof data.label },
-      zipPrefix: { value: data.zipPrefix, type: typeof data.zipPrefix },
+      zipCode: { value: data.zipCode, type: typeof data.zipCode },  // zipPrefix -> zipCode 변경
       fee: { value: data.fee, type: typeof data.fee },
       freeOverAmount: { value: data.freeOverAmount, type: typeof data.freeOverAmount },
       active: { value: data.active, type: typeof data.active },

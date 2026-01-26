@@ -29,6 +29,21 @@ body {
     margin-bottom: 16px !important;
   }
   
+  /* 카드 헤더 반응형 */
+  .ant-card-head {
+    flex-wrap: wrap;
+    padding: 8px 12px !important;
+  }
+  
+  .ant-card-head-title {
+    flex: 1 1 auto;
+    min-width: 120px;
+  }
+  
+  .ant-card-extra {
+    flex: 0 0 auto;
+  }
+  
   /* 버튼 크기 조정 */
   .ant-btn {
     font-size: 14px;
@@ -48,5 +63,40 @@ body {
   .ant-modal {
     margin: 16px;
     max-width: calc(100% - 32px);
+  }
+  
+  /* 탭 반응형 */
+  .ant-tabs-nav {
+    flex-wrap: wrap;
+  }
+  
+  .ant-tabs-tab {
+    padding: 8px 12px !important;
+    font-size: 13px !important;
+  }
+  
+  /* 모바일에서 숨기기 */
+  .hide-on-mobile {
+    display: none;
+  }
+}
+
+/* 소형 모바일 */
+@media (max-width: 480px) {
+  /* 주문 테이블 더 작은 폰트 */
+  .order-stats-table th,
+  .order-stats-table td {
+    padding: 8px 2px !important;
+    font-size: 12px !important;
+  }
+  
+  .order-stats-table td {
+    font-size: 14px !important;
+  }
+  
+  /* DatePicker 작게 */
+  .ant-picker {
+    width: 100% !important;
+    max-width: 150px;
   }
 }

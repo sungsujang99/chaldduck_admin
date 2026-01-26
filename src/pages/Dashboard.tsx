@@ -24,6 +24,16 @@ const Dashboard = () => {
     return weekStart.format('YYYY-MM-DD')
   })
   const [selectedMonth, setSelectedMonth] = useState<string>(dayjs().format('YYYY-MM'))
+  
+  // 주문 통계 필터
+  const [orderStatsTab, setOrderStatsTab] = useState<'all' | 'daily' | 'weekly' | 'monthly'>('daily')
+  const [orderSelectedDate, setOrderSelectedDate] = useState<Dayjs>(dayjs())
+  const [orderSelectedWeek, setOrderSelectedWeek] = useState<string>(() => {
+    const today = dayjs()
+    const weekStart = today.startOf('week')
+    return weekStart.format('YYYY-MM-DD')
+  })
+  const [orderSelectedMonth, setOrderSelectedMonth] = useState<string>(dayjs().format('YYYY-MM'))
 
   // API 상태 확인
   const { refetch: checkApiStatus } = useQuery({
@@ -149,9 +159,42 @@ const Dashboard = () => {
     retry: false,
   })
 
+  // 주문 필터링된 데이터
+  const filteredOrders = useMemo(() => {
+    if (!ordersStatsData?.data) return []
+    
+    const orders = ordersStatsData.data
+    
+    if (orderStatsTab === 'all') {
+      return orders
+    }
+    
+    return orders.filter((order: any) => {
+      // orderNo에서 날짜 추출 (예: OD-20260126-xxx)
+      const match = order.orderNo?.match(/OD-(\d{4})(\d{2})(\d{2})-/)
+      if (!match) return false
+      
+      const orderDate = dayjs(`${match[1]}-${match[2]}-${match[3]}`)
+      
+      if (orderStatsTab === 'daily') {
+        return orderDate.isSame(orderSelectedDate, 'day')
+      } else if (orderStatsTab === 'weekly') {
+        const weekStart = dayjs(orderSelectedWeek)
+        const weekEnd = weekStart.endOf('week')
+        return orderDate.isAfter(weekStart.subtract(1, 'day')) && orderDate.isBefore(weekEnd.add(1, 'day'))
+      } else if (orderStatsTab === 'monthly') {
+        const monthStart = dayjs(orderSelectedMonth).startOf('month')
+        const monthEnd = dayjs(orderSelectedMonth).endOf('month')
+        return orderDate.isAfter(monthStart.subtract(1, 'day')) && orderDate.isBefore(monthEnd.add(1, 'day'))
+      }
+      
+      return true
+    })
+  }, [ordersStatsData, orderStatsTab, orderSelectedDate, orderSelectedWeek, orderSelectedMonth])
+
   // 주문 통계 계산
   const orderStats = useMemo(() => {
-    if (!ordersStatsData?.data) {
+    if (!filteredOrders || filteredOrders.length === 0) {
       return {
         total: 0,
         created: 0,
@@ -159,10 +202,16 @@ const Dashboard = () => {
         confirmed: 0,
         completed: 0,
         canceled: 0,
+        // 추가 통계
+        waitingPayment: 0, // 입금대기 (CREATED)
+        newOrder: 0, // 신규주문 (PAID)
+        pickupWaiting: 0, // 픽업대기 (PICKUP + CONFIRMED)
+        deliveryReady: 0, // 배송준비 (DELIVERY + CONFIRMED, deliveryStatus: READY)
+        delivering: 0, // 배송중 (deliveryStatus: DELIVERING)
       }
     }
 
-    const orders = ordersStatsData.data
+    const orders = filteredOrders
     return {
       total: orders.length,
       created: orders.filter((o) => o.status === 'CREATED').length,
@@ -170,8 +219,14 @@ const Dashboard = () => {
       confirmed: orders.filter((o) => o.status === 'CONFIRMED').length,
       completed: orders.filter((o) => o.status === 'COMPLETED').length,
       canceled: orders.filter((o) => o.status === 'CANCELED').length,
+      // 추가 통계
+      waitingPayment: orders.filter((o) => o.status === 'CREATED').length, // 입금대기
+      newOrder: orders.filter((o) => o.status === 'PAID').length, // 신규주문 (결제완료)
+      pickupWaiting: orders.filter((o) => o.fulfillmentType === 'PICKUP' && o.status === 'CONFIRMED').length, // 픽업대기
+      deliveryReady: orders.filter((o) => o.fulfillmentType === 'DELIVERY' && (o.status === 'CONFIRMED' || o.status === 'PAID') && o.deliveryStatus === 'READY').length, // 배송준비
+      delivering: orders.filter((o) => o.deliveryStatus === 'DELIVERING').length, // 배송중
     }
-  }, [ordersStatsData])
+  }, [filteredOrders])
 
   // 기능 토글
   const toggleFeatureMutation = useMutation({
@@ -264,7 +319,7 @@ const Dashboard = () => {
   }
 
   // 주문 상태별 페이지 이동
-  const handleGoToOrders = (status: 'CREATED' | 'PAID') => {
+  const handleGoToOrders = (status: string) => {
     navigate(`/orders?status=${status}`)
   }
 
@@ -294,38 +349,46 @@ const Dashboard = () => {
     }
   }
 
-  // 주문 상태 한글 변환
-  const getOrderStatusText = (status: string) => {
-    switch (status) {
-      case 'CREATED':
-        return '생성됨'
-      case 'PAID':
-        return '결제완료'
-      case 'CONFIRMED':
-        return '확인됨'
-      case 'COMPLETED':
-        return '완료됨'
-      case 'CANCELED':
-        return '취소됨'
-      default:
-        return status
+  // 전화번호 포맷팅 함수
+  const formatPhoneNumber = (phone?: string) => {
+    if (!phone) return ''
+    const cleaned = phone.replace(/[^0-9]/g, '')
+    if (cleaned.length === 11) {
+      return `${cleaned.slice(0, 3)}-${cleaned.slice(3, 7)}-${cleaned.slice(7)}`
+    } else if (cleaned.length === 10) {
+      return `${cleaned.slice(0, 3)}-${cleaned.slice(3, 6)}-${cleaned.slice(6)}`
     }
+    return phone
   }
 
-  // 배송 상태 한글 변환
-  const getDeliveryStatusText = (status: string) => {
-    switch (status) {
-      case 'NONE':
-        return '없음'
-      case 'READY':
-        return '배송예약'
-      case 'DELIVERING':
-        return '배송중'
-      case 'DELIVERED':
-        return '배송완료'
-      default:
-        return status
+  // 주소에서 공동현관/입구비번 분리
+  const extractEntranceCode = (address: string) => {
+    const patterns = [
+      /공동현관[:\s]*([#\d\*]+)/i,
+      /입구비번[:\s]*([#\d\*]+)/i,
+      /비밀번호[:\s]*([#\d\*]+)/i,
+      /현관[:\s]*([#\d\*]+)/i,
+      /#(\d+#?)/,
+    ]
+    
+    for (const pattern of patterns) {
+      const match = address.match(pattern)
+      if (match) {
+        const code = match[0]
+        const cleanedAddress = address.replace(code, '').trim()
+        return { address: cleanedAddress, entranceCode: match[1] || code }
+      }
     }
+    
+    return { address, entranceCode: '' }
+  }
+
+  // 결제 수단 텍스트 변환
+  const getPaymentMethodText = (method?: string) => {
+    if (!method) return '미결제'
+    if (method === 'BANK_TRANSFER') return '무통장'
+    if (method === 'CARD') return '카드'
+    return method
   }
 
   // 주문 엑셀 다운로드 함수
@@ -342,11 +405,11 @@ const Dashboard = () => {
       // 각 주문의 결제 정보 조회
       const ordersWithPayment = await Promise.all(
         orders.map(async (order) => {
-          let paymentMethod = '미결제'
+          let paymentMethod = ''
           try {
             const paymentResponse = await apiService.getPaymentByOrder(order.orderId)
             if (paymentResponse?.data) {
-              paymentMethod = paymentResponse.data.method === 'BANK_TRANSFER' ? '무통장 입금' : '카드'
+              paymentMethod = paymentResponse.data.method
             }
           } catch {
             // 결제 정보가 없으면 무시
@@ -355,29 +418,46 @@ const Dashboard = () => {
         })
       )
 
-      // 엑셀 데이터 준비
-      const excelData = ordersWithPayment.map((order) => {
-        return {
-          '주문 ID': order.orderId,
-          '주문번호': order.orderNo,
-          '고객 ID': order.customerId,
-          '주문 상태': getOrderStatusText(order.status),
-          '배송 상태': getDeliveryStatusText(order.deliveryStatus),
-          '배송 방식': order.fulfillmentType === 'DELIVERY' ? '배송' : '픽업',
-          '결제 수단': order.paymentMethod || '미결제',
-          '수령인': order.recipientName,
-          '수령인 전화번호': order.recipientPhone,
-          '우편번호': order.zipCode,
-          '주소1': order.address1,
-          '주소2': order.address2,
-          '상품 합계': order.subtotalAmount,
-          '배송비': order.deliveryFee,
-          '할인금액': order.discountAmount,
-          '최종금액': order.finalAmount,
-          '현금영수증': order.cashReceipt ? '발급' : '미발급',
-          '운송장번호': order.trackingNo || '',
-          '상품 수': order.items?.length || 0,
-          '상품 목록': order.items?.map(item => `${item.productName} (${item.quantity}개)`).join(', ') || '',
+      // 엑셀 데이터 준비 - 상품별로 한 줄씩
+      const excelData: any[] = []
+      
+      ordersWithPayment.forEach((order) => {
+        const items = order.items || []
+        
+        // 주소 합치기 + 공동현관 분리
+        const fullAddress = `${order.address1 || ''} ${order.address2 || ''}`.trim()
+        const { address: cleanAddress, entranceCode } = extractEntranceCode(fullAddress)
+        
+        if (items.length === 0) {
+          excelData.push({
+            '이름': order.recipientName || '-',
+            '전화번호': formatPhoneNumber(order.recipientPhone),
+            '상품명': '-',
+            '수량': 0,
+            '단가': 0,
+            '금액': order.finalAmount || 0,
+            '배송지주소': cleanAddress || '-',
+            '공동현관/입구비번': entranceCode || '-',
+            '매입가': '-',
+            '닉네임': order.recipientName || '-',
+            '결제수단': getPaymentMethodText(order.paymentMethod),
+          })
+        } else {
+          items.forEach((item, index) => {
+            excelData.push({
+              '이름': order.recipientName || '-',
+              '전화번호': formatPhoneNumber(order.recipientPhone),
+              '상품명': item.productName || '-',
+              '수량': item.quantity || 0,
+              '단가': item.unitPrice || 0,
+              '금액': index === 0 ? (order.finalAmount || 0) : '',
+              '배송지주소': index === 0 ? (cleanAddress || '-') : '',
+              '공동현관/입구비번': index === 0 ? (entranceCode || '-') : '',
+              '매입가': (item as any).purchasePrice || '-',
+              '닉네임': order.recipientName || '-',
+              '결제수단': index === 0 ? getPaymentMethodText(order.paymentMethod) : '',
+            })
+          })
         }
       })
 
@@ -387,26 +467,17 @@ const Dashboard = () => {
 
       // 컬럼 너비 설정
       const colWidths = [
-        { wch: 10 }, // 주문 ID
-        { wch: 20 }, // 주문번호
-        { wch: 10 }, // 고객 ID
-        { wch: 12 }, // 주문 상태
-        { wch: 12 }, // 배송 상태
-        { wch: 12 }, // 배송 방식
-        { wch: 15 }, // 결제 수단
-        { wch: 15 }, // 수령인
-        { wch: 15 }, // 수령인 전화번호
-        { wch: 10 }, // 우편번호
-        { wch: 30 }, // 주소1
-        { wch: 30 }, // 주소2
-        { wch: 12 }, // 상품 합계
-        { wch: 10 }, // 배송비
-        { wch: 12 }, // 할인금액
-        { wch: 12 }, // 최종금액
-        { wch: 12 }, // 현금영수증
-        { wch: 15 }, // 운송장번호
-        { wch: 10 }, // 상품 수
-        { wch: 50 }, // 상품 목록
+        { wch: 12 },  // 이름
+        { wch: 15 },  // 전화번호
+        { wch: 40 },  // 상품명
+        { wch: 8 },   // 수량
+        { wch: 12 },  // 단가
+        { wch: 12 },  // 금액
+        { wch: 50 },  // 배송지주소
+        { wch: 20 },  // 공동현관/입구비번
+        { wch: 10 },  // 매입가
+        { wch: 12 },  // 닉네임
+        { wch: 12 },  // 결제수단
       ]
       ws['!cols'] = colWidths
 
@@ -489,15 +560,15 @@ const Dashboard = () => {
 
   return (
     <div>
-      <div style={{ marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-        <h1 style={{ margin: 0 }}>대시보드</h1>
-        <Space wrap>
+      <div style={{ marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+        <h1 style={{ margin: 0, fontSize: 'clamp(18px, 5vw, 24px)' }}>대시보드</h1>
+        <Space wrap size="small">
           {lastAutoRefresh && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 16px', backgroundColor: '#f0f0f0', borderRadius: 4 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', backgroundColor: '#f0f0f0', borderRadius: 4 }}>
               <ReloadOutlined spin={false} style={{ color: '#52c41a' }} />
-              <span style={{ fontSize: 13, color: '#666' }}>
-                마지막 새로고침: {lastAutoRefresh.toLocaleTimeString('ko-KR')}
-                <span style={{ marginLeft: 8, color: '#999' }}>(10분마다 자동)</span>
+              <span style={{ fontSize: 12, color: '#666' }}>
+                {lastAutoRefresh.toLocaleTimeString('ko-KR')}
+                <span style={{ marginLeft: 4, color: '#999' }}>(10분)</span>
               </span>
             </div>
           )}
@@ -505,6 +576,7 @@ const Dashboard = () => {
             icon={<ReloadOutlined />}
             onClick={handleManualRefresh}
             type="primary"
+            size="middle"
           >
             새로고침
           </Button>
@@ -591,13 +663,29 @@ const Dashboard = () => {
         </Space>
       </Card>
 
-      {/* 주문 통계 카드 */}
+      {/* 주문 통계 카드 - 테이블 형태 */}
       <Card 
-        title="주문 현황"
+        title={
+          <span 
+            onClick={() => navigate('/orders')} 
+            style={{ cursor: 'pointer', fontWeight: 600, fontSize: 'clamp(14px, 4vw, 16px)' }}
+            onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'}
+            onMouseLeave={(e) => e.currentTarget.style.color = 'inherit'}
+          >
+            전체주문관리 →
+          </span>
+        }
         style={{ 
           marginBottom: 24,
-          backgroundColor: '#fffbe6',
-          border: '1px solid #ffe58f'
+        }}
+        styles={{
+          header: {
+            borderBottom: '2px solid #000',
+            padding: '12px 16px',
+          },
+          body: {
+            padding: 'clamp(12px, 3vw, 24px)',
+          }
         }}
         extra={
           <Button
@@ -605,11 +693,62 @@ const Dashboard = () => {
             icon={<DownloadOutlined />}
             onClick={handleExportOrdersToExcel}
             disabled={ordersStatsLoading || !ordersStatsData?.data || ordersStatsData.data.length === 0}
+            size="small"
           >
-            주문 엑셀 다운로드
+            <span className="hide-on-mobile">주문 </span>엑셀
           </Button>
         }
       >
+        {/* 기간 필터 */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+            <Tabs
+              activeKey={orderStatsTab}
+              onChange={(key) => setOrderStatsTab(key as 'all' | 'daily' | 'weekly' | 'monthly')}
+              items={[
+                { key: 'all', label: '전체' },
+                { key: 'daily', label: '일별' },
+                { key: 'weekly', label: '주별' },
+                { key: 'monthly', label: '월별' },
+              ]}
+              style={{ marginBottom: 0 }}
+              size="small"
+            />
+            {orderStatsTab === 'daily' && (
+              <DatePicker
+                value={orderSelectedDate}
+                onChange={(date) => date && setOrderSelectedDate(date)}
+                format="YYYY-MM-DD"
+                placeholder="날짜 선택"
+                size="small"
+                style={{ width: 130 }}
+              />
+            )}
+            {orderStatsTab === 'weekly' && (
+              <DatePicker
+                picker="week"
+                value={dayjs(orderSelectedWeek)}
+                onChange={(date) => date && setOrderSelectedWeek(date.startOf('week').format('YYYY-MM-DD'))}
+                format="YYYY [W]주"
+                placeholder="주 선택"
+                size="small"
+                style={{ width: 130 }}
+              />
+            )}
+            {orderStatsTab === 'monthly' && (
+              <DatePicker
+                picker="month"
+                value={dayjs(orderSelectedMonth)}
+                onChange={(date) => date && setOrderSelectedMonth(date.format('YYYY-MM'))}
+                format="YYYY년 MM월"
+                placeholder="월 선택"
+                size="small"
+                style={{ width: 130 }}
+              />
+            )}
+          </div>
+        </div>
+        
         {ordersStatsLoading ? (
           <div style={{ textAlign: 'center', padding: '40px 0' }}>
             <Spin size="large" />
@@ -617,140 +756,167 @@ const Dashboard = () => {
           </div>
         ) : (
           <div style={{ 
-            display: 'flex', 
-            flexWrap: 'wrap', 
-            gap: 16,
-            justifyContent: 'space-around',
-            padding: '8px 0'
+            display: 'grid', 
+            gridTemplateColumns: 'repeat(auto-fit, minmax(100px, 1fr))', 
+            gap: 12,
           }}>
-            <div style={{ textAlign: 'center', minWidth: 100 }}>
-              <div style={{ fontSize: 24, fontWeight: 700, color: '#d48806' }}>
-                {orderStats.total}
-              </div>
-              <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>총 주문건수</div>
+            {/* 총 주문 */}
+            <div 
+              style={{ 
+                padding: 16, 
+                borderRadius: 8, 
+                backgroundColor: '#f5f5f5',
+                textAlign: 'center',
+              }}
+            >
+              <div style={{ fontSize: 13, color: '#666', marginBottom: 8 }}>총 주문</div>
+              <div style={{ fontSize: 24, fontWeight: 700 }}>{orderStats.total}</div>
             </div>
             
-            {/* 생성된 주문 - 강조 (클릭 가능) */}
+            {/* 입금대기 */}
             <div 
               onClick={() => handleGoToOrders('CREATED')}
               style={{ 
-                textAlign: 'center', 
-                minWidth: 120,
-                padding: '12px 16px',
-                backgroundColor: '#e6f7ff',
-                border: '2px solid #1890ff',
-                borderRadius: 8,
-                boxShadow: '0 2px 8px rgba(24, 144, 255, 0.2)',
+                padding: 16, 
+                borderRadius: 8, 
+                backgroundColor: '#e6f4ff',
+                textAlign: 'center',
                 cursor: 'pointer',
-                transition: 'all 0.3s ease',
-                position: 'relative' as const,
+                transition: 'transform 0.2s, box-shadow 0.2s',
               }}
               onMouseEnter={(e) => {
-                e.currentTarget.style.transform = 'translateY(-4px)'
-                e.currentTarget.style.boxShadow = '0 4px 16px rgba(24, 144, 255, 0.4)'
-                e.currentTarget.style.borderColor = '#0050b3'
+                e.currentTarget.style.transform = 'translateY(-2px)'
+                e.currentTarget.style.boxShadow = '0 4px 12px rgba(24, 144, 255, 0.2)'
               }}
               onMouseLeave={(e) => {
                 e.currentTarget.style.transform = 'translateY(0)'
-                e.currentTarget.style.boxShadow = '0 2px 8px rgba(24, 144, 255, 0.2)'
-                e.currentTarget.style.borderColor = '#1890ff'
+                e.currentTarget.style.boxShadow = 'none'
               }}
             >
-              <div style={{ 
-                fontSize: 32, 
-                fontWeight: 900, 
-                color: '#1890ff',
-                textShadow: '0 1px 2px rgba(0,0,0,0.1)'
-              }}>
-                {orderStats.created}
-              </div>
-              <div style={{ 
-                fontSize: 13, 
-                color: '#1890ff', 
-                marginTop: 6,
-                fontWeight: 600
-              }}>
-                🆕 생성된 주문
-              </div>
-              <div style={{ 
-                fontSize: 11, 
-                color: '#1890ff', 
-                marginTop: 4,
-                opacity: 0.7
-              }}>
-                클릭하여 상세보기 →
-              </div>
+              <div style={{ fontSize: 13, color: '#1890ff', marginBottom: 8 }}>입금대기</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: '#1890ff' }}>{orderStats.waitingPayment}</div>
             </div>
             
-            {/* 결제완료 - 강조 (클릭 가능) */}
+            {/* 신규주문 */}
             <div 
               onClick={() => handleGoToOrders('PAID')}
               style={{ 
-                textAlign: 'center', 
-                minWidth: 120,
-                padding: '12px 16px',
+                padding: 16, 
+                borderRadius: 8, 
                 backgroundColor: '#f6ffed',
-                border: '2px solid #52c41a',
-                borderRadius: 8,
-                boxShadow: '0 2px 8px rgba(82, 196, 26, 0.2)',
+                textAlign: 'center',
                 cursor: 'pointer',
-                transition: 'all 0.3s ease',
-                position: 'relative' as const,
+                transition: 'transform 0.2s, box-shadow 0.2s',
               }}
               onMouseEnter={(e) => {
-                e.currentTarget.style.transform = 'translateY(-4px)'
-                e.currentTarget.style.boxShadow = '0 4px 16px rgba(82, 196, 26, 0.4)'
-                e.currentTarget.style.borderColor = '#389e0d'
+                e.currentTarget.style.transform = 'translateY(-2px)'
+                e.currentTarget.style.boxShadow = '0 4px 12px rgba(82, 196, 26, 0.2)'
               }}
               onMouseLeave={(e) => {
                 e.currentTarget.style.transform = 'translateY(0)'
-                e.currentTarget.style.boxShadow = '0 2px 8px rgba(82, 196, 26, 0.2)'
-                e.currentTarget.style.borderColor = '#52c41a'
+                e.currentTarget.style.boxShadow = 'none'
               }}
             >
-              <div style={{ 
-                fontSize: 32, 
-                fontWeight: 900, 
-                color: '#52c41a',
-                textShadow: '0 1px 2px rgba(0,0,0,0.1)'
-              }}>
-                {orderStats.paid}
-              </div>
-              <div style={{ 
-                fontSize: 13, 
-                color: '#52c41a', 
-                marginTop: 6,
-                fontWeight: 600
-              }}>
-                ✅ 결제완료
-              </div>
-              <div style={{ 
-                fontSize: 11, 
-                color: '#52c41a', 
-                marginTop: 4,
-                opacity: 0.7
-              }}>
-                클릭하여 상세보기 →
-              </div>
+              <div style={{ fontSize: 13, color: '#52c41a', marginBottom: 8 }}>신규주문</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: '#52c41a' }}>{orderStats.newOrder}</div>
             </div>
             
-            <div style={{ textAlign: 'center', minWidth: 100 }}>
-              <div style={{ fontSize: 24, fontWeight: 700, color: '#d48806' }}>
-                {orderStats.confirmed}
-              </div>
-              <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>주문확인</div>
+            {/* 픽업대기 */}
+            <div 
+              onClick={() => handleGoToOrders('PICKUP_WAITING')}
+              style={{ 
+                padding: 16, 
+                borderRadius: 8, 
+                backgroundColor: '#f9f0ff',
+                textAlign: 'center',
+                cursor: 'pointer',
+                transition: 'transform 0.2s, box-shadow 0.2s',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = 'translateY(-2px)'
+                e.currentTarget.style.boxShadow = '0 4px 12px rgba(114, 46, 209, 0.2)'
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = 'translateY(0)'
+                e.currentTarget.style.boxShadow = 'none'
+              }}
+            >
+              <div style={{ fontSize: 13, color: '#722ed1', marginBottom: 8 }}>픽업대기</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: '#722ed1' }}>{orderStats.pickupWaiting}</div>
             </div>
-            <div style={{ textAlign: 'center', minWidth: 100 }}>
-              <div style={{ fontSize: 24, fontWeight: 700, color: '#52c41a' }}>
-                {orderStats.completed}
-              </div>
-              <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>완료</div>
+            
+            {/* 배송준비 */}
+            <div 
+              onClick={() => handleGoToOrders('DELIVERY_READY')}
+              style={{ 
+                padding: 16, 
+                borderRadius: 8, 
+                backgroundColor: '#e6fffb',
+                textAlign: 'center',
+                cursor: 'pointer',
+                transition: 'transform 0.2s, box-shadow 0.2s',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = 'translateY(-2px)'
+                e.currentTarget.style.boxShadow = '0 4px 12px rgba(19, 194, 194, 0.2)'
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = 'translateY(0)'
+                e.currentTarget.style.boxShadow = 'none'
+              }}
+            >
+              <div style={{ fontSize: 13, color: '#13c2c2', marginBottom: 8 }}>배송준비</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: '#13c2c2' }}>{orderStats.deliveryReady}</div>
             </div>
-            <div style={{ textAlign: 'center', minWidth: 100 }}>
-              <div style={{ fontSize: 24, fontWeight: 700, color: '#ff4d4f' }}>
-                {orderStats.canceled}
-              </div>
-              <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>취소</div>
+            
+            {/* 배송중 */}
+            <div 
+              onClick={() => handleGoToOrders('DELIVERY')}
+              style={{ 
+                padding: 16, 
+                borderRadius: 8, 
+                backgroundColor: '#fff7e6',
+                textAlign: 'center',
+                cursor: 'pointer',
+                transition: 'transform 0.2s, box-shadow 0.2s',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = 'translateY(-2px)'
+                e.currentTarget.style.boxShadow = '0 4px 12px rgba(250, 140, 22, 0.2)'
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = 'translateY(0)'
+                e.currentTarget.style.boxShadow = 'none'
+              }}
+            >
+              <div style={{ fontSize: 13, color: '#fa8c16', marginBottom: 8 }}>배송중</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: '#fa8c16' }}>{orderStats.delivering}</div>
+            </div>
+            
+            {/* 완료 */}
+            <div 
+              style={{ 
+                padding: 16, 
+                borderRadius: 8, 
+                backgroundColor: '#f6ffed',
+                textAlign: 'center',
+              }}
+            >
+              <div style={{ fontSize: 13, color: '#52c41a', marginBottom: 8 }}>완료</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: '#52c41a' }}>{orderStats.completed}</div>
+            </div>
+            
+            {/* 취소 */}
+            <div 
+              style={{ 
+                padding: 16, 
+                borderRadius: 8, 
+                backgroundColor: '#fff2f0',
+                textAlign: 'center',
+              }}
+            >
+              <div style={{ fontSize: 13, color: '#ff4d4f', marginBottom: 8 }}>취소</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: '#ff4d4f' }}>{orderStats.canceled}</div>
             </div>
           </div>
         )}

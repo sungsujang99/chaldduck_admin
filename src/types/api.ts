@@ -104,6 +104,8 @@ export interface OrderResponse {
   deliveryStatus: DeliveryStatus;
   trackingNo?: string;
   items: OrderItemResponse[];
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 // Payment types
@@ -267,7 +269,9 @@ export interface ProductResponse {
   updatedAt?: string;
 }
 
-export interface ProductUpdateRequest {
+// ProductUpdateRequest는 위에서 정의됨 (purchasePrice, price, stockQty, safetyStock, active 포함)
+// 하위 호환성 타입은 ProductUpdateRequestLegacy로 분리
+export interface ProductUpdateRequestLegacy {
   productName?: string;
   description?: string;
   unitPrice?: number;
@@ -276,7 +280,7 @@ export interface ProductUpdateRequest {
 }
 
 // Policy types
-export type ShippingRuleType = 'ZIP_PREFIX_FEE' | 'FREE_OVER_AMOUNT' | 'DEFAULT_FEE';
+export type ShippingRuleType = 'ZIP_CODE_DISCOUNT' | 'FREE_OVER_AMOUNT' | 'DEFAULT_FEE';
 export type DiscountRuleType = 'BANK_TRANSFER_FIXED' | 'QTY_FIXED' | 'BANK_TRANSFER_RATE' | 'QTY_RATE';
 
 export interface ShippingPolicy {
@@ -314,7 +318,7 @@ export interface ShippingRuleCreateRequest {
   policyId: number;
   type: ShippingRuleType;
   label: string;
-  zipPrefix?: string;
+  zipCode?: string;  // 서버 API 스펙에 맞게 zipPrefix -> zipCode로 변경
   fee?: number;
   freeOverAmount?: number;
   active?: boolean;
@@ -398,7 +402,7 @@ export interface ShippingRuleResponse {
   policyId: number;
   type: ShippingRuleType;
   label: string;
-  zipPrefix?: string;
+  zipCode?: string;  // 서버 API 스펙 변경: zipPrefix -> zipCode
   fee?: number;
   freeOverAmount?: number;
   active: boolean;

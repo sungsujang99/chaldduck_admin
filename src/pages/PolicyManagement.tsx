@@ -185,8 +185,8 @@ const PolicyManagement = () => {
                 id: rule.id,
                 type: rule.type,
                 label: rule.label,
-                zipPrefix: rule.zipPrefix,
-                zipPrefixType: typeof rule.zipPrefix,
+                zipCode: rule.zipCode,
+                zipCodeType: typeof rule.zipCode,
                 fee: rule.fee,
                 freeOverAmount: rule.freeOverAmount,
               })
@@ -342,17 +342,19 @@ const PolicyManagement = () => {
       }
       
       // 타입별 필수 필드 검증
-      let zipPrefix: string | undefined = undefined
+      let zipCode: string | undefined = undefined
       let fee: number | undefined = undefined
       let freeOverAmount: number | undefined = undefined
       
-      if (values.type === 'ZIP_PREFIX_FEE') {
-        // ZIP_PREFIX_FEE 타입은 zipPrefix(전체 우편번호)와 fee가 필요
-        console.log('[DEBUG] ZIP_PREFIX_FEE 타입 처리:', {
-          'values.zipPrefix': values.zipPrefix,
-          'values.zipPrefix type': typeof values.zipPrefix,
-          'values.fee': values.fee,
-        })
+      if (values.type === 'ZIP_CODE_DISCOUNT') {
+        // ZIP_CODE_DISCOUNT 타입은 zipCode(전체 우편번호)와 fee가 필요, freeOverAmount는 선택
+        console.log('========================================')
+        console.log('[지역별 배송비] 폼 입력값 확인:')
+        console.log('  - 우편번호 (zipPrefix):', values.zipPrefix, '| 타입:', typeof values.zipPrefix)
+        console.log('  - 배송비 (fee):', values.fee, '| 타입:', typeof values.fee)
+        console.log('  - 무료배송 금액 (freeOverAmount):', values.freeOverAmount, '| 타입:', typeof values.freeOverAmount)
+        console.log('========================================')
+        
         if (!values.zipPrefix || values.zipPrefix.trim() === '') {
           message.error('우편번호를 입력해주세요.')
           return
@@ -361,9 +363,19 @@ const PolicyManagement = () => {
           message.error('배송비를 입력해주세요.')
           return
         }
-        zipPrefix = values.zipPrefix.trim()
+        zipCode = values.zipPrefix.trim()  // 폼의 zipPrefix 값을 API의 zipCode로 매핑
         fee = Number(values.fee)
-        console.log('[DEBUG] ZIP_PREFIX_FEE 처리 결과:', { zipPrefix, fee })
+        // freeOverAmount가 있으면 설정 (선택 사항)
+        if (values.freeOverAmount !== undefined && values.freeOverAmount !== null && values.freeOverAmount > 0) {
+          freeOverAmount = Number(values.freeOverAmount)
+        }
+        
+        console.log('========================================')
+        console.log('[지역별 배송비] 변환 후 값:')
+        console.log('  - zipCode:', zipCode)
+        console.log('  - fee:', fee, '원')
+        console.log('  - freeOverAmount:', freeOverAmount, freeOverAmount ? '원 이상 무료' : '(미설정)')
+        console.log('========================================')
       } else if (values.type === 'FREE_OVER_AMOUNT') {
         // FREE_OVER_AMOUNT 타입은 freeOverAmount가 필요
         if (values.freeOverAmount === undefined || values.freeOverAmount === null || values.freeOverAmount < 0) {
@@ -381,36 +393,37 @@ const PolicyManagement = () => {
       }
       
       // 최종 데이터 생성 (모든 필드 포함, 필수가 아니면 0)
-      console.log('[DEBUG] 최종 데이터 생성 전:', { zipPrefix, zipPrefixType: typeof zipPrefix, fee, freeOverAmount })
+      console.log('[DEBUG] 최종 데이터 생성 전:', { zipCode, zipCodeType: typeof zipCode, fee, freeOverAmount })
       const data: ShippingRuleCreateRequest = {
         policyId: policyId,
         type: values.type,
         label: values.label.trim(),
         active: values.active !== undefined ? values.active : true,
         // 모든 필드 포함 (필수가 아니면 기본값 설정)
-        // zipPrefix는 빈 문자열이 아닐 때만 포함
-        ...(zipPrefix !== undefined && zipPrefix !== '' ? { zipPrefix } : {}),
+        // zipCode는 빈 문자열이 아닐 때만 포함
+        ...(zipCode !== undefined && zipCode !== '' ? { zipCode } : {}),
         fee: fee !== undefined ? fee : 0,
         freeOverAmount: freeOverAmount !== undefined ? freeOverAmount : 0,
       }
       console.log('[DEBUG] 최종 데이터 생성 후:', { 
-        'data.zipPrefix': data.zipPrefix, 
-        'data.zipPrefix type': typeof data.zipPrefix,
-        'zipPrefix in data': 'zipPrefix' in data,
+        'data.zipCode': data.zipCode, 
+        'data.zipCode type': typeof data.zipCode,
+        'zipCode in data': 'zipCode' in data,
         fullData: data 
       })
       
       // 최종 데이터 검증
-      console.log('[PolicyManagement] 배송비 룰 생성 최종 요청 데이터:', JSON.stringify(data, null, 2))
-      console.log('[PolicyManagement] 데이터 검증:', {
-        policyId: data.policyId,
-        type: data.type,
-        label: data.label,
-        zipPrefix: data.zipPrefix,
-        fee: data.fee,
-        freeOverAmount: data.freeOverAmount,
-        active: data.active,
-      })
+      console.log('========================================')
+      console.log('[API 전송] 최종 요청 데이터:')
+      console.log('  - policyId:', data.policyId)
+      console.log('  - type:', data.type)
+      console.log('  - label:', data.label)
+      console.log('  - zipCode:', data.zipCode)
+      console.log('  - fee:', data.fee, '원')
+      console.log('  - freeOverAmount:', data.freeOverAmount, data.freeOverAmount ? '원 이상 무료' : '(미설정)')
+      console.log('  - active:', data.active)
+      console.log('[API 전송] JSON:', JSON.stringify(data, null, 2))
+      console.log('========================================')
       
       createShippingRuleMutation.mutate(data)
     }).catch((error) => {
@@ -503,7 +516,7 @@ const PolicyManagement = () => {
       width: 150,
       render: (type: string) => {
         const typeMap: Record<string, string> = {
-          ZIP_PREFIX_FEE: '지역별 배송비',
+          ZIP_CODE_DISCOUNT: '지역별 배송비',
           FREE_OVER_AMOUNT: '무료배송 금액',
           DEFAULT_FEE: '기본 배송비',
         }
@@ -517,28 +530,28 @@ const PolicyManagement = () => {
     },
     {
       title: '우편번호',
-      dataIndex: 'zipPrefix',
-      key: 'zipPrefix',
-      render: (zipPrefix: string, record: any) => {
+      dataIndex: 'zipCode',
+      key: 'zipCode',
+      render: (zipCode: string, record: any) => {
         console.log('[DEBUG] 우편번호 컬럼 렌더:', { 
-          zipPrefix, 
-          zipPrefixType: typeof zipPrefix,
+          zipCode, 
+          zipCodeType: typeof zipCode,
           recordId: record?.id,
           recordType: record?.type,
           recordLabel: record?.label,
           fullRecord: record 
         })
-        if (!zipPrefix) {
-          console.log('[DEBUG] zipPrefix가 falsy, "-" 반환')
+        if (!zipCode) {
+          console.log('[DEBUG] zipCode가 falsy, "-" 반환')
           return '-'
         }
-        const regionName = getRegionFromZipCode(zipPrefix)
-        console.log('[DEBUG] 우편번호 렌더 결과:', { zipPrefix, regionName })
+        const regionName = getRegionFromZipCode(zipCode)
+        console.log('[DEBUG] 우편번호 렌더 결과:', { zipCode, regionName })
         return (
           <Space direction="vertical" size={0}>
             <Space>
-              <Tag color="blue" style={{ fontWeight: 'bold' }}>{zipPrefix}</Tag>
-              {regionName !== `우편번호 ${zipPrefix}` && (
+              <Tag color="blue" style={{ fontWeight: 'bold' }}>{zipCode}</Tag>
+              {regionName !== `우편번호 ${zipCode}` && (
                 <Typography.Text strong>{regionName}</Typography.Text>
               )}
             </Space>
@@ -576,26 +589,38 @@ const PolicyManagement = () => {
           }
           
           try {
+            console.log('[무료배송 수정] 시작 - ruleId:', record.id, 'policyId:', policyId)
+            
             // 1. 기존 룰 삭제
-            await apiService.deleteShippingRule(record.id)
+            console.log('[무료배송 수정] 1단계: 기존 룰 삭제 시작 - ruleId:', record.id)
+            const deleteResult = await apiService.deleteShippingRule(record.id)
+            console.log('[무료배송 수정] 1단계: 삭제 완료 - 결과:', deleteResult)
             
             // 2. 새 룰 생성 (같은 내용, freeOverAmount만 변경)
-            await apiService.createShippingRule({
+            const createData = {
               policyId: policyId,
               type: record.type,
               label: record.label,
               active: record.active,
-              zipPrefix: record.zipPrefix || undefined,
+              zipCode: record.zipCode || undefined,
               fee: record.fee || 0,
               freeOverAmount: newAmount,
-            })
+            }
+            console.log('[무료배송 수정] 2단계: 새 룰 생성 시작 - 데이터:', createData)
+            const createResult = await apiService.createShippingRule(createData)
+            console.log('[무료배송 수정] 2단계: 생성 완료 - 결과:', createResult)
             
             message.success('무료배송 금액이 수정되었습니다.')
             setEditingFreeOverAmount(null)
             setEditingFreeOverAmountValue('')
             refetchShippingPolicies()
           } catch (error: any) {
-            console.error('무료배송 금액 수정 실패:', error)
+            console.error('[무료배송 수정] 에러 발생:', error)
+            console.error('[무료배송 수정] 에러 상세:', {
+              message: error.message,
+              response: error.response?.data,
+              status: error.response?.status,
+            })
             message.error(error.response?.data?.message || '수정에 실패했습니다.')
             // 실패 시에도 refetch하여 현재 상태 동기화
             refetchShippingPolicies()
@@ -635,6 +660,13 @@ const PolicyManagement = () => {
             </Space>
           )
         }
+        // DEFAULT_FEE 타입은 무료배송 금액 수정 불가
+        if (record.type === 'DEFAULT_FEE') {
+          return (
+            <Typography.Text type="secondary">-</Typography.Text>
+          )
+        }
+        
         return (
           <span
             onDoubleClick={() => {
@@ -644,7 +676,11 @@ const PolicyManagement = () => {
             style={{ cursor: 'pointer', padding: '4px 8px', display: 'inline-block' }}
             title="더블클릭하여 수정"
           >
-            {amount !== undefined ? `${amount.toLocaleString()}원` : '-'}
+            {amount !== undefined && amount > 0 ? (
+              <Tag color="green">{amount.toLocaleString()}원 이상 무료</Tag>
+            ) : (
+              <Typography.Text type="secondary">-</Typography.Text>
+            )}
           </span>
         )
       },
@@ -814,7 +850,7 @@ const PolicyManagement = () => {
             rules={[{ required: true, message: '타입을 선택해주세요.' }]}
           >
             <Select placeholder="타입 선택">
-              <Select.Option value="ZIP_PREFIX_FEE">지역별 배송비</Select.Option>
+              <Select.Option value="ZIP_CODE_DISCOUNT">지역별 배송비</Select.Option>
               <Select.Option value="FREE_OVER_AMOUNT">무료배송 금액</Select.Option>
               <Select.Option value="DEFAULT_FEE">기본 배송비</Select.Option>
             </Select>
@@ -834,7 +870,7 @@ const PolicyManagement = () => {
               const type = getFieldValue('type')
               return (
                 <>
-                  {type === 'ZIP_PREFIX_FEE' && (
+                  {type === 'ZIP_CODE_DISCOUNT' && (
                     <>
                       <Form.Item
                         label={
@@ -884,7 +920,19 @@ const PolicyManagement = () => {
                         name="fee"
                         rules={[{ required: true, message: '배송비를 입력해주세요.' }]}
                       >
-                        <InputNumber style={{ width: '100%' }} placeholder="2500" min={0} />
+                        <InputNumber style={{ width: '100%' }} placeholder="2500" min={0} addonAfter="원" />
+                      </Form.Item>
+                      <Form.Item
+                        label={
+                          <Space>
+                            <span>무료배송 기준 금액</span>
+                            <Tag color="orange">선택</Tag>
+                          </Space>
+                        }
+                        name="freeOverAmount"
+                        extra="이 금액 이상 주문 시 해당 지역 배송비가 무료가 됩니다. (0 또는 미입력 시 무료배송 미적용)"
+                      >
+                        <InputNumber style={{ width: '100%' }} placeholder="50000" min={0} addonAfter="원 이상 무료" />
                       </Form.Item>
                     </>
                   )}
