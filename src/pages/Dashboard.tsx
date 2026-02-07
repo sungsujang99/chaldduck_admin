@@ -15,6 +15,7 @@ const Dashboard = () => {
   const [apiStatus, setApiStatus] = useState<'checking' | 'online' | 'offline'>('checking')
   const [lastCheck, setLastCheck] = useState<Date | null>(null)
   const [lastAutoRefresh, setLastAutoRefresh] = useState<Date | null>(null)
+  const [isRefreshing, setIsRefreshing] = useState(false)
   const queryClient = useQueryClient()
   const [salesStatsTab, setSalesStatsTab] = useState<'daily' | 'weekly' | 'monthly'>('daily')
   const [selectedDate, setSelectedDate] = useState<Dayjs>(dayjs())
@@ -26,7 +27,7 @@ const Dashboard = () => {
   const [selectedMonth, setSelectedMonth] = useState<string>(dayjs().format('YYYY-MM'))
   
   // 주문 통계 필터
-  const [orderStatsTab, setOrderStatsTab] = useState<'all' | 'daily' | 'weekly' | 'monthly'>('daily')
+  const [orderStatsTab, setOrderStatsTab] = useState<'all' | 'daily' | 'weekly' | 'monthly' | 'quarterly'>('all')
   const [orderSelectedDate, setOrderSelectedDate] = useState<Dayjs>(dayjs())
   const [orderSelectedWeek, setOrderSelectedWeek] = useState<string>(() => {
     const today = dayjs()
@@ -119,7 +120,7 @@ const Dashboard = () => {
     queryKey: ['allOrdersForStats'],
     queryFn: async () => {
       try {
-        console.log('[Dashboard] 주문 통계 조회 시작 (새로운 페이징 API 사용)')
+        console.log('[Dashboard] 주문 통계 조회 시작')
         
         // 모든 주문을 페이징으로 가져오기
         const allOrders: OrderResponse[] = []
@@ -130,12 +131,31 @@ const Dashboard = () => {
         while (hasMore) {
           try {
             const response = await apiService.getAllOrdersAdmin({ page, size: pageSize })
+            console.log(`[Dashboard] 페이지 ${page} 응답:`, response)
             
-            if (response.data && response.data.content && response.data.content.length > 0) {
-              allOrders.push(...response.data.content)
+            // API 응답 형식 확인 (배열 또는 페이지네이션 객체)
+            let orders: OrderResponse[] = []
+            let isLastPage = true
+            
+            if (response.data) {
+              // 배열인 경우 (JsonBodyListOrderResponse)
+              if (Array.isArray(response.data)) {
+                orders = response.data
+                isLastPage = true // 배열 응답은 한번에 전체를 반환
+                console.log(`[Dashboard] 배열 응답: ${orders.length}개`)
+              } 
+              // 페이지네이션 객체인 경우
+              else if (response.data.content) {
+                orders = response.data.content
+                isLastPage = response.data.last || orders.length < pageSize
+                console.log(`[Dashboard] 페이지네이션 응답: ${orders.length}개, last: ${response.data.last}`)
+              }
+            }
+            
+            if (orders.length > 0) {
+              allOrders.push(...orders)
               
-              // 마지막 페이지인지 확인
-              if (response.data.last || response.data.content.length < pageSize) {
+              if (isLastPage) {
                 hasMore = false
               } else {
                 page++
@@ -144,7 +164,7 @@ const Dashboard = () => {
               hasMore = false
             }
           } catch (err: any) {
-            console.error(`[Dashboard] 주문 조회 실패 (페이지 ${page}):`, err.message)
+            console.error(`[Dashboard] 주문 조회 실패 (페이지 ${page}):`, err.message, err)
             hasMore = false
           }
         }
@@ -186,6 +206,10 @@ const Dashboard = () => {
         const monthStart = dayjs(orderSelectedMonth).startOf('month')
         const monthEnd = dayjs(orderSelectedMonth).endOf('month')
         return orderDate.isAfter(monthStart.subtract(1, 'day')) && orderDate.isBefore(monthEnd.add(1, 'day'))
+      } else if (orderStatsTab === 'quarterly') {
+        // 최근 3개월
+        const threeMonthsAgo = dayjs().subtract(3, 'month').startOf('day')
+        return orderDate.isAfter(threeMonthsAgo.subtract(1, 'day'))
       }
       
       return true
@@ -253,24 +277,34 @@ const Dashboard = () => {
     // 초기 로드 시간 기록
     setLastAutoRefresh(new Date())
 
-    const intervalId = setInterval(() => {
+    const intervalId = setInterval(async () => {
       console.log('[Dashboard] 자동 새로고침 실행 (10분마다)')
+      
+      // 로딩 상태 시작
+      setIsRefreshing(true)
+      message.loading({ content: '🔄 자동 새로고침 중...', key: 'autoRefresh', duration: 0 })
       
       // 새로고침 시간 업데이트
       const now = new Date()
       setLastAutoRefresh(now)
       
       // 모든 쿼리 무효화 및 재조회
-      queryClient.invalidateQueries({ queryKey: ['features'] })
-      queryClient.invalidateQueries({ queryKey: ['allOrdersForStats'] })
-      queryClient.invalidateQueries({ queryKey: ['dailySales'] })
-      queryClient.invalidateQueries({ queryKey: ['weeklySales'] })
-      queryClient.invalidateQueries({ queryKey: ['monthlySales'] })
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['features'] }),
+        queryClient.invalidateQueries({ queryKey: ['allOrdersForStats'] }),
+        queryClient.invalidateQueries({ queryKey: ['dailySales'] }),
+        queryClient.invalidateQueries({ queryKey: ['weeklySales'] }),
+        queryClient.invalidateQueries({ queryKey: ['monthlySales'] }),
+      ])
       
       // API 상태도 다시 확인
       checkApiStatus()
       
-      message.info('대시보드 데이터를 자동으로 새로고침했습니다.', 2)
+      // 완료 표시
+      setTimeout(() => {
+        setIsRefreshing(false)
+        message.success({ content: '✅ 자동 새로고침 완료!', key: 'autoRefresh', duration: 2 })
+      }, 500)
     }, AUTO_REFRESH_INTERVAL)
 
     // 클린업: 컴포넌트 언마운트 시 interval 제거
@@ -286,8 +320,8 @@ const Dashboard = () => {
   const getFeatureLabel = (key: FeatureKey) => {
     switch (key) {
       case 'ORDER':
-        return '주문서'
-      case 'BANK_TRANSFER':
+        return '무통장'
+      case 'DELIVERY_ORDER':
         return '배송'
       default:
         return key
@@ -299,23 +333,30 @@ const Dashboard = () => {
     checkApiStatus()
   }
 
-  const handleManualRefresh = () => {
+  const handleManualRefresh = async () => {
     console.log('[Dashboard] 수동 새로고침 실행')
+    setIsRefreshing(true)
     
     // 새로고침 시간 업데이트
     setLastAutoRefresh(new Date())
     
     // 모든 쿼리 무효화 및 재조회
-    queryClient.invalidateQueries({ queryKey: ['features'] })
-    queryClient.invalidateQueries({ queryKey: ['allOrdersForStats'] })
-    queryClient.invalidateQueries({ queryKey: ['dailySales'] })
-    queryClient.invalidateQueries({ queryKey: ['weeklySales'] })
-    queryClient.invalidateQueries({ queryKey: ['monthlySales'] })
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['features'] }),
+      queryClient.invalidateQueries({ queryKey: ['allOrdersForStats'] }),
+      queryClient.invalidateQueries({ queryKey: ['dailySales'] }),
+      queryClient.invalidateQueries({ queryKey: ['weeklySales'] }),
+      queryClient.invalidateQueries({ queryKey: ['monthlySales'] }),
+    ])
     
     // API 상태도 다시 확인
     checkApiStatus()
     
-    message.success('대시보드를 새로고침했습니다.')
+    // 최소 0.5초 후에 완료 표시 (시각적 피드백)
+    setTimeout(() => {
+      setIsRefreshing(false)
+      message.success({ content: '✅ 새로고침 완료!', duration: 1.5 })
+    }, 500)
   }
 
   // 주문 상태별 페이지 이동
@@ -384,6 +425,25 @@ const Dashboard = () => {
   }
 
   // 결제 수단 텍스트 변환
+  const getStatusText = (status: string, fulfillmentType?: string) => {
+    switch (status) {
+      case 'CREATED':
+        return '생성됨'
+      case 'PAID':
+        // 픽업 주문이면 "픽업대기", 배송 주문이면 "결제완료"
+        return fulfillmentType === 'PICKUP' ? '픽업대기' : '결제완료'
+      case 'CONFIRMED':
+        // 배송 주문만 "배송준비" (픽업은 PAID에서 이미 픽업대기)
+        return fulfillmentType === 'PICKUP' ? '확인됨' : '배송준비'
+      case 'COMPLETED':
+        return '완료됨'
+      case 'CANCELED':
+        return '취소됨'
+      default:
+        return status
+    }
+  }
+
   const getPaymentMethodText = (method?: string) => {
     if (!method) return '미결제'
     if (method === 'BANK_TRANSFER') return '무통장'
@@ -399,6 +459,22 @@ const Dashboard = () => {
     }
 
     try {
+      message.loading({ content: '상품 정보 조회 중...', key: 'excel-products' })
+      // 상품 목록 조회 (매입가 매칭용)
+      const productsResponse = await apiService.getProducts()
+      console.log('[Dashboard Excel Debug] 조회된 상품 목록:', productsResponse.data)
+      
+      // productId로 매칭하는 Map
+      const productsMapById = new Map(
+        productsResponse.data.map(p => [p.productId, p.purchasePrice || 0])
+      )
+      // 상품명으로 매칭하는 Map (fallback)
+      const productsMapByName = new Map(
+        productsResponse.data.map(p => [p.name, p.purchasePrice || 0])
+      )
+      console.log('[Dashboard Excel Debug] 상품 Map (by ID):', Array.from(productsMapById.entries()))
+      console.log('[Dashboard Excel Debug] 상품 Map (by Name):', Array.from(productsMapByName.entries()))
+      
       message.loading({ content: '엑셀 파일 생성 중...', key: 'excel' })
       const orders = ordersStatsData.data
 
@@ -423,42 +499,53 @@ const Dashboard = () => {
       
       ordersWithPayment.forEach((order) => {
         const items = order.items || []
+        console.log(`[Dashboard Excel Debug] 주문 ${order.orderNo} items:`, items)
         
-        // 주소 합치기 + 공동현관 분리
-        const fullAddress = `${order.address1 || ''} ${order.address2 || ''}`.trim()
+        // 주소 합치기 (건물명 포함) + 공동현관 분리
+        const fullAddress = `${order.address1 || ''} ${order.address2 || ''} ${(order as any).address3 || ''}`.trim()
         const { address: cleanAddress, entranceCode } = extractEntranceCode(fullAddress)
         
-        if (items.length === 0) {
+        // 각 상품별로 개별 행 생성
+        items.forEach((item) => {
+          let purchasePriceUnit = 0
+          const productId = item.productId
+          const productName = item.productName
+          
+          // 1차: productId로 매칭 시도
+          if (productId) {
+            purchasePriceUnit = productsMapById.get(productId) || 0
+          }
+          
+          // 2차: productId가 없거나 매칭 실패시 상품명으로 매칭
+          if (purchasePriceUnit === 0 && productName) {
+            purchasePriceUnit = productsMapByName.get(productName) || 0
+          }
+          
+          const quantity = item.quantity || 0
+          const salesUnitPrice = item.unitPrice || 0  // 매출단가 (판매 단가)
+          const itemPurchasePrice = purchasePriceUnit * quantity  // 매입가 = 매입단가 * 수량
+          const itemSalesPrice = salesUnitPrice * quantity  // 매출가 = 매출단가 * 수량
+          
+          console.log(`[Dashboard Excel Debug] 상품명=${productName}, productId=${productId}, 수량=${quantity}, 매출단가=${salesUnitPrice}, 매출가=${itemSalesPrice}, 매입가=${itemPurchasePrice}`)
+          
           excelData.push({
+            '년월일': order.orderedAt ? dayjs(order.orderedAt).format('YYYY-MM-DD') : '-',
+            '주문번호': order.orderNo || '-',
+            '주문상태': getStatusText(order.status, order.fulfillmentType),
             '이름': order.recipientName || '-',
             '전화번호': formatPhoneNumber(order.recipientPhone),
-            '상품명': '-',
-            '수량': 0,
-            '단가': 0,
-            '금액': order.finalAmount || 0,
+            '상품명': productName || '-',
+            '수량': quantity,
+            '단가': salesUnitPrice,  // 매출단가
+            '매출가': itemSalesPrice,
+            '배송비': order.deliveryFee || 0,
             '배송지주소': cleanAddress || '-',
             '공동현관/입구비번': entranceCode || '-',
-            '매입가': '-',
-            '닉네임': order.recipientName || '-',
+            '매입가': itemPurchasePrice > 0 ? itemPurchasePrice : '-',
             '결제수단': getPaymentMethodText(order.paymentMethod),
+            '배송방식': order.fulfillmentType === 'PICKUP' ? '픽업' : '배송',
           })
-        } else {
-          items.forEach((item, index) => {
-            excelData.push({
-              '이름': order.recipientName || '-',
-              '전화번호': formatPhoneNumber(order.recipientPhone),
-              '상품명': item.productName || '-',
-              '수량': item.quantity || 0,
-              '단가': item.unitPrice || 0,
-              '금액': index === 0 ? (order.finalAmount || 0) : '',
-              '배송지주소': index === 0 ? (cleanAddress || '-') : '',
-              '공동현관/입구비번': index === 0 ? (entranceCode || '-') : '',
-              '매입가': (item as any).purchasePrice || '-',
-              '닉네임': order.recipientName || '-',
-              '결제수단': index === 0 ? getPaymentMethodText(order.paymentMethod) : '',
-            })
-          })
-        }
+        })
       })
 
       // 워크북 생성
@@ -467,17 +554,21 @@ const Dashboard = () => {
 
       // 컬럼 너비 설정
       const colWidths = [
+        { wch: 12 },  // 년월일
+        { wch: 20 },  // 주문번호
+        { wch: 12 },  // 주문상태
         { wch: 12 },  // 이름
         { wch: 15 },  // 전화번호
         { wch: 40 },  // 상품명
         { wch: 8 },   // 수량
         { wch: 12 },  // 단가
-        { wch: 12 },  // 금액
+        { wch: 12 },  // 매출가
+        { wch: 10 },  // 배송비
         { wch: 50 },  // 배송지주소
         { wch: 20 },  // 공동현관/입구비번
-        { wch: 10 },  // 매입가
-        { wch: 12 },  // 닉네임
+        { wch: 12 },  // 매입가
         { wch: 12 },  // 결제수단
+        { wch: 10 },  // 배송방식
       ]
       ws['!cols'] = colWidths
 
@@ -560,7 +651,7 @@ const Dashboard = () => {
 
   return (
     <div>
-      <div style={{ marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
         <h1 style={{ margin: 0, fontSize: 'clamp(18px, 5vw, 24px)' }}>대시보드</h1>
         <Space wrap size="small">
           {lastAutoRefresh && (
@@ -573,97 +664,23 @@ const Dashboard = () => {
             </div>
           )}
           <Button
-            icon={<ReloadOutlined />}
+            icon={<ReloadOutlined spin={isRefreshing} />}
             onClick={handleManualRefresh}
             type="primary"
             size="middle"
+            loading={isRefreshing}
+            style={{ 
+              minWidth: 110,
+              transition: 'all 0.3s',
+              ...(isRefreshing ? { backgroundColor: '#52c41a', borderColor: '#52c41a' } : {})
+            }}
           >
-            새로고침
+            {isRefreshing ? '새로고침 중...' : '새로고침'}
           </Button>
         </Space>
       </div>
-      
-      {/* API 상태 카드 */}
-      <Card style={{ marginBottom: 24 }}>
-        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
-            <Space>
-              <ApiOutlined style={{ fontSize: 24 }} />
-              <div>
-                <div style={{ fontSize: 16, fontWeight: 600 }}>API 서버 상태</div>
-                <div style={{ fontSize: 14, color: '#666', marginTop: 4, wordBreak: 'break-all' }}>
-                  {import.meta.env.VITE_API_BASE_URL || 'https://찰떡상회.com'}
-                </div>
-              </div>
-            </Space>
-            <Space wrap>
-              <Tag color={getApiStatusColor()} style={{ fontSize: 14, padding: '4px 12px' }}>
-                {getApiStatusText()}
-              </Tag>
-              <Button 
-                icon={<ReloadOutlined />} 
-                onClick={handleRefreshStatus}
-                loading={apiStatus === 'checking'}
-              >
-                상태 확인
-              </Button>
-            </Space>
-          </div>
-          {lastCheck && (
-            <div style={{ fontSize: 12, color: '#999' }}>
-              마지막 확인: {lastCheck.toLocaleTimeString('ko-KR')}
-            </div>
-          )}
-          
-          {/* 기능 On/Off */}
-          <Divider style={{ margin: '16px 0' }} />
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-            <SettingOutlined style={{ fontSize: 20 }} />
-            <div style={{ fontSize: 16, fontWeight: 600 }}>기능 On/Off</div>
-          </div>
-          {featuresLoading ? (
-            <div style={{ textAlign: 'center', padding: '20px 0' }}>
-              <Spin size="small" />
-              <div style={{ marginTop: 8, color: '#666', fontSize: 12 }}>기능 정보를 불러오는 중...</div>
-            </div>
-          ) : featuresData?.data && featuresData.data.length > 0 ? (
-            <Space direction="vertical" size="small" style={{ width: '100%' }}>
-              {featuresData.data.map((feature: FeatureFlagResponse) => (
-                <div
-                  key={feature.key}
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    padding: '8px 0',
-                    borderBottom: '1px solid #f0f0f0',
-                  }}
-                >
-                  <div>
-                    <div style={{ fontWeight: 500 }}>{getFeatureLabel(feature.key)}</div>
-                    {feature.description && (
-                      <div style={{ fontSize: 12, color: '#999', marginTop: 4 }}>
-                        {feature.description}
-                      </div>
-                    )}
-                  </div>
-                  <Switch
-                    checked={feature.enabled}
-                    onChange={(checked) => handleFeatureToggle(feature.key, checked)}
-                    loading={toggleFeatureMutation.isPending}
-                    checkedChildren="ON"
-                    unCheckedChildren="OFF"
-                  />
-                </div>
-              ))}
-            </Space>
-          ) : (
-            <div style={{ color: '#999', fontSize: 12 }}>기능 정보를 불러올 수 없습니다.</div>
-          )}
-        </Space>
-      </Card>
 
-      {/* 주문 통계 카드 - 테이블 형태 */}
+      {/* 주문 통계 카드 - 최상단 배치 */}
       <Card 
         title={
           <span 
@@ -704,12 +721,13 @@ const Dashboard = () => {
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
             <Tabs
               activeKey={orderStatsTab}
-              onChange={(key) => setOrderStatsTab(key as 'all' | 'daily' | 'weekly' | 'monthly')}
+              onChange={(key) => setOrderStatsTab(key as 'all' | 'daily' | 'weekly' | 'monthly' | 'quarterly')}
               items={[
                 { key: 'all', label: '전체' },
                 { key: 'daily', label: '일별' },
                 { key: 'weekly', label: '주별' },
                 { key: 'monthly', label: '월별' },
+                { key: 'quarterly', label: '3개월' },
               ]}
               style={{ marginBottom: 0 }}
               size="small"
@@ -1078,6 +1096,85 @@ const Dashboard = () => {
         </Space>
       </Card>
 
+      {/* API 상태 카드 */}
+      <Card style={{ marginBottom: 24 }}>
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
+            <Space>
+              <ApiOutlined style={{ fontSize: 24 }} />
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 600 }}>API 서버 상태</div>
+                <div style={{ fontSize: 14, color: '#666', marginTop: 4, wordBreak: 'break-all' }}>
+                  {import.meta.env.VITE_API_BASE_URL || 'https://찰떡상회.com'}
+                </div>
+              </div>
+            </Space>
+            <Space wrap>
+              <Tag color={getApiStatusColor()} style={{ fontSize: 14, padding: '4px 12px' }}>
+                {getApiStatusText()}
+              </Tag>
+              <Button 
+                icon={<ReloadOutlined />} 
+                onClick={handleRefreshStatus}
+                loading={apiStatus === 'checking'}
+              >
+                상태 확인
+              </Button>
+            </Space>
+          </div>
+          {lastCheck && (
+            <div style={{ fontSize: 12, color: '#999' }}>
+              마지막 확인: {lastCheck.toLocaleTimeString('ko-KR')}
+            </div>
+          )}
+          
+          {/* 기능 On/Off */}
+          <Divider style={{ margin: '16px 0' }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+            <SettingOutlined style={{ fontSize: 20 }} />
+            <div style={{ fontSize: 16, fontWeight: 600 }}>기능 On/Off</div>
+          </div>
+          {featuresLoading ? (
+            <div style={{ textAlign: 'center', padding: '20px 0' }}>
+              <Spin size="small" />
+              <div style={{ marginTop: 8, color: '#666', fontSize: 12 }}>기능 정보를 불러오는 중...</div>
+            </div>
+          ) : featuresData?.data && featuresData.data.length > 0 ? (
+            <Space direction="vertical" size="small" style={{ width: '100%' }}>
+              {featuresData.data.map((feature: FeatureFlagResponse) => (
+                <div
+                  key={feature.key}
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    padding: '8px 0',
+                    borderBottom: '1px solid #f0f0f0',
+                  }}
+                >
+                  <div>
+                    <div style={{ fontWeight: 500 }}>{getFeatureLabel(feature.key)}</div>
+                    {feature.description && (
+                      <div style={{ fontSize: 12, color: '#999', marginTop: 4 }}>
+                        {feature.description}
+                      </div>
+                    )}
+                  </div>
+                  <Switch
+                    checked={feature.enabled}
+                    onChange={(checked) => handleFeatureToggle(feature.key, checked)}
+                    loading={toggleFeatureMutation.isPending}
+                    checkedChildren="ON"
+                    unCheckedChildren="OFF"
+                  />
+                </div>
+              ))}
+            </Space>
+          ) : (
+            <div style={{ color: '#999', fontSize: 12 }}>기능 정보를 불러올 수 없습니다.</div>
+          )}
+        </Space>
+      </Card>
 
     </div>
   )

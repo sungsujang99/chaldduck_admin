@@ -17,7 +17,9 @@ import {
   Switch,
   Select,
   Collapse,
+  Checkbox,
 } from 'antd'
+import type { CheckboxChangeEvent } from 'antd/es/checkbox'
 import { PlusOutlined, ReloadOutlined, DeleteOutlined, GiftOutlined, ExclamationCircleOutlined, OrderedListOutlined, HolderOutlined } from '@ant-design/icons'
 import {
   DndContext,
@@ -49,6 +51,7 @@ import type {
   ProductUpdateRequest,
   ProductReorderRequest,
   ProductOrderItem,
+  AdminCategoryRow,
 } from '@/types/api'
 
 const { Title } = Typography
@@ -88,14 +91,14 @@ const loadCategories = (): CategoryInfo[] => {
   return DEFAULT_CATEGORIES
 }
 
-// localStorage에 카테고리 설정 저장
-const saveCategories = (categories: CategoryInfo[]) => {
-  try {
-    localStorage.setItem('productCategories', JSON.stringify(categories))
-  } catch (e) {
-    console.error('Failed to save categories:', e)
-  }
-}
+// localStorage에 카테고리 설정 저장 (이제 서버 데이터 사용하므로 미사용)
+// const saveCategories = (categories: CategoryInfo[]) => {
+//   try {
+//     localStorage.setItem('productCategories', JSON.stringify(categories))
+//   } catch (e) {
+//     console.error('Failed to save categories:', e)
+//   }
+// }
 
 const getCategoryInfo = (categoryValue?: string, categories?: CategoryInfo[]): CategoryInfo | undefined => {
   const cats = categories || DEFAULT_CATEGORIES
@@ -192,12 +195,15 @@ const ProductList = () => {
   const [productActiveStates, setProductActiveStates] = useState<Record<number, boolean>>({})
   const [isCategoryManagementOpen, setIsCategoryManagementOpen] = useState(false)
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string | 'ALL'>('ALL')
-  const [categories, setCategories] = useState<CategoryInfo[]>(loadCategories())
-  const [editingCategory, setEditingCategory] = useState<CategoryInfo | null>(null)
+  const [categories] = useState<CategoryInfo[]>(loadCategories())  // 로컬 카테고리 (일부 기능에서 사용)
+  const [editingServerCategory, setEditingServerCategory] = useState<AdminCategoryRow | null>(null)
   const [categoryEditForm] = Form.useForm()
   // 상품 전시 순서 변경 관련 상태
   const [isReorderModalOpen, setIsReorderModalOpen] = useState(false)
   const [reorderList, setReorderList] = useState<AdminProductStockRow[]>([])
+  // 상품 선택 관련 상태
+  const [selectedProductIds, setSelectedProductIds] = useState<number[]>([])
+  const [isRefreshing, setIsRefreshing] = useState(false)
 
   const { data: productsData, isLoading, error, refetch } = useQuery({
     queryKey: ['products'],
@@ -214,6 +220,15 @@ const ProductList = () => {
       errorMessage: '상품 목록을 불러오는데 실패했습니다.',
     },
   })
+
+  // 서버 카테고리 조회
+  const { data: serverCategoriesData } = useQuery({
+    queryKey: ['adminCategories'],
+    queryFn: () => apiService.getAdminCategories(),
+    retry: false,
+  })
+  
+  const serverCategories = serverCategoriesData?.data || []
 
   // 상품 로드 시 초기 active 상태 설정
   useEffect(() => {
@@ -438,6 +453,27 @@ const ProductList = () => {
     },
     onError: (error: any) => {
       message.error(error.response?.data?.message || '재고 수정에 실패했습니다.')
+    },
+  })
+
+  // 상품 일괄 상태 변경
+  const bulkUpdateActiveStateMutation = useMutation({
+    mutationFn: async ({ productIds, active }: { productIds: number[]; active: boolean }) => {
+      await Promise.all(
+        productIds.map(productId => 
+          apiService.updateProduct(productId, { active })
+        )
+      )
+      return { productIds, active }
+    },
+    onSuccess: ({ productIds, active }) => {
+      message.success(`${productIds.length}개 상품이 ${active ? '활성화' : '비활성화'}되었습니다.`)
+      setSelectedProductIds([])
+      queryClient.invalidateQueries({ queryKey: ['products'] })
+      refetch()
+    },
+    onError: (error: any) => {
+      message.error(error.response?.data?.message || '상태 변경에 실패했습니다.')
     },
   })
 
@@ -674,22 +710,27 @@ const ProductList = () => {
 
   const handleModalOk = () => {
     form.validateFields().then((values) => {
-      const requestData: any = {
-        name: values.productName || values.name,
-        price: values.unitPrice || values.price,
-        initialStockQty: values.stock || values.initialStockQty || 0,
-        safetyStock: values.safetyStock || 0,
-        purchasePrice: values.purchasePrice,
+      // 필수 필드만 포함한 최소 요청
+      const requestData: ProductCreateRequest = {
+        name: values.name,
+        price: Number(values.price) || 0,
+        initialStockQty: Number(values.initialStockQty) || 0,
+        safetyStock: Number(values.safetyStock) || 0,
       }
       
-      // category와 taxType은 값이 있을 때만 포함 (하위 호환성)
-      if (values.category) {
-        requestData.category = values.category
+      // 선택 필드는 값이 있을 때만
+      if (values.purchasePrice) {
+        requestData.purchasePrice = Number(values.purchasePrice)
+      }
+      // categoryId는 숫자로 전송 (카테고리 선택 시)
+      if (values.categoryId) {
+        requestData.categoryId = Number(values.categoryId)
       }
       if (values.taxType) {
         requestData.taxType = values.taxType
       }
       
+      console.log('[handleModalOk] 상품 등록 요청 데이터:', JSON.stringify(requestData, null, 2))
       createProductMutation.mutate(requestData)
     })
   }
@@ -723,7 +764,7 @@ const ProductList = () => {
       name: product.name,
       price: product.price,
       purchasePrice: product.purchasePrice,
-      category: product.category,
+      categoryId: product.categoryId,
       taxType: product.taxType,
     })
     setIsEditProductModalOpen(true)
@@ -746,8 +787,8 @@ const ProductList = () => {
       if (values.purchasePrice !== undefined && values.purchasePrice !== editingProduct.purchasePrice) {
         updateData.purchasePrice = values.purchasePrice
       }
-      if (values.category && values.category !== editingProduct.category) {
-        updateData.category = values.category
+      if (values.categoryId !== undefined && values.categoryId !== editingProduct.categoryId) {
+        updateData.categoryId = values.categoryId
       }
       if (values.taxType && values.taxType !== editingProduct.taxType) {
         updateData.taxType = values.taxType
@@ -1143,18 +1184,36 @@ const ProductList = () => {
                 await apiService.deleteProduct(productId)
                 
                 // 4. 새 상품 생성 (purchasePrice만 수정)
+                // categoryId 찾기: 상품의 categoryCode로 카테고리 목록에서 매칭
+                let categoryIdToUse: number | undefined = currentProduct.categoryId
+                if (!categoryIdToUse && currentProduct.categoryCode && serverCategoriesData?.data) {
+                  const matchedCategory = serverCategoriesData.data.find(
+                    (cat: any) => cat.code === currentProduct.categoryCode
+                  )
+                  if (matchedCategory) {
+                    categoryIdToUse = matchedCategory.categoryId
+                  }
+                }
+                
                 const newProductData: ProductCreateRequest = {
                   name: currentProduct.name,
                   price: currentProduct.price,
                   initialStockQty: currentProduct.stockQty ?? 0,
                   safetyStock: currentProduct.safetyStock ?? 0,
                   purchasePrice: numValue,
-                  category: currentProduct.category as any,
                   taxType: currentProduct.taxType as any,
+                  categoryId: categoryIdToUse,
                 }
                 
+                console.log('[ProductList] 새 상품 생성 데이터:', JSON.stringify(newProductData, null, 2))
+                
                 const newProductResponse = await apiService.createProduct(newProductData)
+                console.log('[ProductList] 새 상품 생성 응답:', newProductResponse)
                 const newProductId = newProductResponse.data?.productId
+                
+                if (!newProductId) {
+                  throw new Error('새 상품 생성에 실패했습니다. (productId 없음)')
+                }
                 
                 // 5. 할인 룰 재생성 (새 productId로)
                 if (newProductId && existingRules.length > 0) {
@@ -1218,8 +1277,8 @@ const ProductList = () => {
           }
           return
         case 'category':
-          console.log('[DEBUG] 카테고리 수정 시작:', { productId, field, editingValue, currentCategory: product.category })
-          updateData.category = editingValue
+          console.log('[DEBUG] 카테고리 수정 시작:', { productId, field, editingValue, currentCategoryCode: product.categoryCode })
+          updateData.categoryId = Number(editingValue)
           break
         case 'taxType':
           console.log('[DEBUG] 과세유형 수정 시작:', { productId, field, editingValue, currentTaxType: product.taxType })
@@ -1254,7 +1313,7 @@ const ProductList = () => {
     }
 
     // 재고/안전재고 수정 로직
-    let updateData: ProductUpdateRequest = {}
+    const updateData: ProductUpdateRequest = {}
 
     switch (field) {
       case 'stockQty':
@@ -1320,6 +1379,8 @@ const ProductList = () => {
         )
       }
       if (field === 'category') {
+        // 서버에서 가져온 카테고리 목록 사용
+        const serverCategories = serverCategoriesData?.data || []
         return (
           <Space>
             <Select
@@ -1327,11 +1388,11 @@ const ProductList = () => {
               onChange={(val) => setEditingValue(val)}
               autoFocus
               size="small"
-              style={{ width: 120 }}
+              style={{ width: 140 }}
             >
-              {categories.filter(cat => cat.active !== false).map(cat => (
-                <Select.Option key={cat.value} value={cat.value}>
-                  {cat.label}
+              {serverCategories.filter(cat => cat.active !== false).map(cat => (
+                <Select.Option key={cat.categoryId} value={cat.categoryId}>
+                  {cat.name}
                 </Select.Option>
               ))}
             </Select>
@@ -1403,7 +1464,37 @@ const ProductList = () => {
     return taxType ? taxTypeMap[taxType] || taxType : '-'
   }
 
-  const columns = [
+  const getColumns = () => [
+    {
+      title: (
+        <Checkbox
+          checked={selectedProductIds.length === (filteredProducts?.length || 0) && selectedProductIds.length > 0}
+          indeterminate={selectedProductIds.length > 0 && selectedProductIds.length < (filteredProducts?.length || 0)}
+          onChange={(e: CheckboxChangeEvent) => {
+            if (e.target.checked) {
+              setSelectedProductIds(filteredProducts?.map(p => p.productId) || [])
+            } else {
+              setSelectedProductIds([])
+            }
+          }}
+        />
+      ),
+      key: 'checkbox',
+      width: 50,
+      fixed: 'left' as const,
+      render: (_: any, record: AdminProductStockRow) => (
+        <Checkbox
+          checked={selectedProductIds.includes(record.productId)}
+          onChange={(e: CheckboxChangeEvent) => {
+            if (e.target.checked) {
+              setSelectedProductIds([...selectedProductIds, record.productId])
+            } else {
+              setSelectedProductIds(selectedProductIds.filter(id => id !== record.productId))
+            }
+          }}
+        />
+      ),
+    },
     {
       title: '상품 ID',
       dataIndex: 'productId',
@@ -1427,26 +1518,28 @@ const ProductList = () => {
           </span>
         </Space>
       ),
-      dataIndex: 'category',
+      dataIndex: 'categoryCode',
       key: 'category',
       width: 140,
       render: (_value: string | undefined, record: AdminProductStockRow) => {
         const isEditing = editingCell?.productId === record.productId && editingCell?.field === 'category'
+        // 서버에서 받은 categoryName 또는 categoryCode 표시
+        const displayValue = record.categoryName || record.categoryCode || '-'
+        // categoryId를 우선 사용, 없으면 categoryCode로 서버 카테고리에서 찾기
+        const serverCategories = serverCategoriesData?.data || []
+        const currentCategoryId = record.categoryId || serverCategories.find(c => c.code === record.categoryCode)?.categoryId
         return renderEditableCell(
           record.productId,
           'category',
-          record.category,
+          currentCategoryId,
           isEditing,
           () => handleCellSave(record.productId, 'category'),
           handleCellCancel,
-          (value) => {
-            const categoryInfo = getCategoryInfo(value as string, categories)
-            return (
-              <Tag color={categoryInfo?.color || 'default'}>
-                {categoryInfo?.label || '-'}
-              </Tag>
-            )
-          }
+          () => (
+            <Tag color="blue">
+              {displayValue}
+            </Tag>
+          )
         )
       },
     },
@@ -1730,27 +1823,35 @@ const ProductList = () => {
     return products.filter(p => p.active !== false && !p.deletedAt)
   }, [products])
 
-  // 카테고리별 상품 필터링
+  // 카테고리별 상품 필터링 (서버 categoryCode 기준)
   const filteredProducts = useMemo(() => {
     if (selectedCategoryFilter === 'ALL') {
       return activeProducts
     }
-    return activeProducts.filter(p => p.category === selectedCategoryFilter)
+    return activeProducts.filter(p => p.categoryCode === selectedCategoryFilter)
   }, [activeProducts, selectedCategoryFilter])
 
-  // 카테고리별 통계 (활성 상품만)
-  const categoryStats = useMemo(() => {
+  // 카테고리별 통계 (서버 카테고리 기반, 활성 상품만)
+  const serverCategoryStats = useMemo(() => {
     const stats: Record<string, { count: number; totalStock: number }> = {}
+    const serverCategories = serverCategoriesData?.data || []
     
-    categories.forEach(cat => {
-      stats[cat.value] = { count: 0, totalStock: 0 }
+    serverCategories.forEach(cat => {
+      stats[cat.code] = { count: 0, totalStock: 0 }
     })
 
     activeProducts.forEach(product => {
-      const category = product.category || 'OTHER'
-      if (stats[category]) {
-        stats[category].count++
-        stats[category].totalStock += product.stockQty
+      const categoryCode = product.categoryCode || 'OTHER'
+      if (stats[categoryCode]) {
+        stats[categoryCode].count++
+        stats[categoryCode].totalStock += product.stockQty
+      } else {
+        // 알 수 없는 카테고리
+        if (!stats['OTHER']) {
+          stats['OTHER'] = { count: 0, totalStock: 0 }
+        }
+        stats['OTHER'].count++
+        stats['OTHER'].totalStock += product.stockQty
       }
     })
 
@@ -1763,19 +1864,32 @@ const ProductList = () => {
         <Title level={2} style={{ margin: 0 }}>판매 상품 관리</Title>
         <Space wrap>
           <Button 
-            icon={<ReloadOutlined />} 
-            onClick={() => {
+            icon={<ReloadOutlined spin={isRefreshing} />} 
+            onClick={async () => {
+              setIsRefreshing(true)
               // 모든 관련 쿼리 무효화 후 강제로 다시 불러오기
-              queryClient.invalidateQueries({ queryKey: ['products'] })
-              queryClient.invalidateQueries({ queryKey: ['discountPolicies'] })
-              queryClient.refetchQueries({ queryKey: ['products'] })
-              queryClient.refetchQueries({ queryKey: ['discountPolicies'] })
-              refetch()
-              refetchDiscountPolicies()
+              await Promise.all([
+                queryClient.invalidateQueries({ queryKey: ['products'] }),
+                queryClient.invalidateQueries({ queryKey: ['discountPolicies'] }),
+              ])
+              await Promise.all([
+                refetch(),
+                refetchDiscountPolicies(),
+              ])
+              setTimeout(() => {
+                setIsRefreshing(false)
+                message.success({ content: '✅ 새로고침 완료!', duration: 1.5 })
+              }, 300)
             }} 
-            loading={isLoading}
+            loading={isRefreshing}
+            type="primary"
+            style={{ 
+              minWidth: 110,
+              transition: 'all 0.3s',
+              ...(isRefreshing ? { backgroundColor: '#52c41a', borderColor: '#52c41a' } : {})
+            }}
           >
-            새로고침
+            {isRefreshing ? '새로고침 중...' : '새로고침'}
           </Button>
           <Button 
             icon={<GiftOutlined />} 
@@ -1801,29 +1915,13 @@ const ProductList = () => {
         open={isCategoryManagementOpen}
         onCancel={() => {
           setIsCategoryManagementOpen(false)
-          setEditingCategory(null)
+          setEditingServerCategory(null)
           categoryEditForm.resetFields()
         }}
         footer={[
-          <Button 
-            key="reset" 
-            onClick={() => {
-              Modal.confirm({
-                title: '전체 카테고리 초기화',
-                content: '삭제된 카테고리를 포함하여 모든 카테고리를 기본값으로 복원하시겠습니까?',
-                onOk: () => {
-                  setCategories(DEFAULT_CATEGORIES)
-                  saveCategories(DEFAULT_CATEGORIES)
-                  message.success('모든 카테고리가 초기화되었습니다.')
-                }
-              })
-            }}
-          >
-            전체 초기화
-          </Button>,
           <Button key="close" type="primary" onClick={() => {
             setIsCategoryManagementOpen(false)
-            setEditingCategory(null)
+            setEditingServerCategory(null)
             categoryEditForm.resetFields()
           }}>
             닫기
@@ -1835,46 +1933,42 @@ const ProductList = () => {
           <div>
             <Typography.Title level={5}>카테고리별 상품 현황</Typography.Title>
             <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 16 }}>
-              카테고리를 클릭하여 수정하거나 삭제할 수 있습니다. 삭제된 카테고리는 목록에서 숨겨집니다.
+              카테고리를 클릭하여 수정하거나 삭제할 수 있습니다.
             </Typography.Text>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 16 }}>
-              {categories.filter(cat => cat.active !== false).map(category => {
-                const stats = categoryStats[category.value] || { count: 0, totalStock: 0 }
+              {(serverCategoriesData?.data || []).filter(cat => cat.active).map(category => {
+                const stats = serverCategoryStats[category.code] || { count: 0, totalStock: 0 }
                 return (
                   <Card 
-                    key={category.value}
+                    key={category.categoryId}
                     size="small"
                     hoverable
-                    style={{ border: editingCategory?.value === category.value ? '2px solid #1890ff' : undefined }}
+                    style={{ border: editingServerCategory?.categoryId === category.categoryId ? '2px solid #1890ff' : undefined }}
                   >
                     <Space direction="vertical" size={8} style={{ width: '100%' }}>
                       <div onClick={() => {
-                        setSelectedCategoryFilter(category.value)
+                        setSelectedCategoryFilter(category.code)
                         setIsCategoryManagementOpen(false)
                       }} style={{ cursor: 'pointer' }}>
-                        <Tag color={category.color}>{category.label}</Tag>
+                        <Tag color="blue">{category.name}</Tag>
                         <Typography.Text strong style={{ fontSize: 20, display: 'block', marginTop: 4 }}>
                           {stats.count}개
                         </Typography.Text>
                         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                           총 재고: {stats.totalStock}개
                         </Typography.Text>
-                        {category.description && (
-                          <Typography.Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
-                            {category.description}
-                          </Typography.Text>
-                        )}
+                        <Typography.Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
+                          {category.code} 상품
+                        </Typography.Text>
                       </div>
                       <Space size="small" style={{ width: '100%', justifyContent: 'flex-end' }}>
                         <Button
                           size="small"
                           onClick={(e) => {
                             e.stopPropagation()
-                            setEditingCategory(category)
+                            setEditingServerCategory(category)
                             categoryEditForm.setFieldsValue({
-                              label: category.label,
-                              color: category.color,
-                              description: category.description,
+                              name: category.name,
                             })
                           }}
                         >
@@ -1888,18 +1982,18 @@ const ProductList = () => {
                             e.stopPropagation()
                             Modal.confirm({
                               title: '카테고리 삭제',
-                              content: `"${category.label}" 카테고리를 삭제하시겠습니까? 삭제된 카테고리는 목록에서 숨겨지며, 기존 상품은 그대로 유지됩니다.`,
+                              content: `"${category.name}" 카테고리를 삭제하시겠습니까?`,
                               okText: '삭제',
                               okButtonProps: { danger: true },
-                              onOk: () => {
-                                const newCategories = categories.map(c =>
-                                  c.value === category.value
-                                    ? { ...c, active: false }
-                                    : c
-                                )
-                                setCategories(newCategories)
-                                saveCategories(newCategories)
-                                message.success(`"${category.label}" 카테고리가 삭제되었습니다.`)
+                              onOk: async () => {
+                                try {
+                                  await apiService.deleteCategory(category.categoryId)
+                                  message.success(`"${category.name}" 카테고리가 삭제되었습니다.`)
+                                  queryClient.invalidateQueries({ queryKey: ['adminCategories'] })
+                                } catch (error) {
+                                  console.error('카테고리 삭제 에러:', error)
+                                  message.error('카테고리 삭제에 실패했습니다.')
+                                }
                               }
                             })
                           }}
@@ -1914,15 +2008,15 @@ const ProductList = () => {
             </div>
           </div>
 
-          {editingCategory && (
+          {editingServerCategory && (
             <Card 
-              title={`"${editingCategory.label}" 수정`} 
+              title={`"${editingServerCategory.name}" 수정`} 
               size="small"
               extra={
                 <Button 
                   size="small" 
                   onClick={() => {
-                    setEditingCategory(null)
+                    setEditingServerCategory(null)
                     categoryEditForm.resetFields()
                   }}
                 >
@@ -1933,51 +2027,27 @@ const ProductList = () => {
               <Form
                 form={categoryEditForm}
                 layout="vertical"
-                onFinish={(values) => {
-                  const newCategories = categories.map(c =>
-                    c.value === editingCategory.value
-                      ? { ...c, ...values }
-                      : c
-                  )
-                  setCategories(newCategories)
-                  saveCategories(newCategories)
-                  message.success('카테고리가 수정되었습니다.')
-                  setEditingCategory(null)
-                  categoryEditForm.resetFields()
+                onFinish={async (values) => {
+                  try {
+                    await apiService.updateCategory(editingServerCategory.categoryId, {
+                      name: values.name
+                    })
+                    message.success('카테고리가 수정되었습니다.')
+                    setEditingServerCategory(null)
+                    categoryEditForm.resetFields()
+                    queryClient.invalidateQueries({ queryKey: ['adminCategories'] })
+                  } catch (error) {
+                    console.error('카테고리 수정 에러:', error)
+                    message.error('카테고리 수정에 실패했습니다.')
+                  }
                 }}
               >
                 <Form.Item
                   label="이름"
-                  name="label"
+                  name="name"
                   rules={[{ required: true, message: '이름을 입력해주세요.' }]}
                 >
                   <Input placeholder="카테고리 이름" />
-                </Form.Item>
-                <Form.Item
-                  label="색상"
-                  name="color"
-                  rules={[{ required: true, message: '색상을 선택해주세요.' }]}
-                >
-                  <Select>
-                    <Select.Option value="magenta"><Tag color="magenta">magenta</Tag></Select.Option>
-                    <Select.Option value="red"><Tag color="red">red</Tag></Select.Option>
-                    <Select.Option value="volcano"><Tag color="volcano">volcano</Tag></Select.Option>
-                    <Select.Option value="orange"><Tag color="orange">orange</Tag></Select.Option>
-                    <Select.Option value="gold"><Tag color="gold">gold</Tag></Select.Option>
-                    <Select.Option value="lime"><Tag color="lime">lime</Tag></Select.Option>
-                    <Select.Option value="green"><Tag color="green">green</Tag></Select.Option>
-                    <Select.Option value="cyan"><Tag color="cyan">cyan</Tag></Select.Option>
-                    <Select.Option value="blue"><Tag color="blue">blue</Tag></Select.Option>
-                    <Select.Option value="geekblue"><Tag color="geekblue">geekblue</Tag></Select.Option>
-                    <Select.Option value="purple"><Tag color="purple">purple</Tag></Select.Option>
-                    <Select.Option value="default"><Tag color="default">default</Tag></Select.Option>
-                  </Select>
-                </Form.Item>
-                <Form.Item
-                  label="설명"
-                  name="description"
-                >
-                  <Input.TextArea rows={2} placeholder="카테고리 설명 (선택)" />
                 </Form.Item>
                 <Button type="primary" htmlType="submit" block>
                   저장
@@ -1997,12 +2067,12 @@ const ProductList = () => {
               <Select.Option value="ALL">
                 전체 ({activeProducts.length}개)
               </Select.Option>
-              {categories.filter(cat => cat.active !== false).map(category => {
-                const stats = categoryStats[category.value] || { count: 0, totalStock: 0 }
+              {(serverCategoriesData?.data || []).filter(cat => cat.active).map(category => {
+                const stats = serverCategoryStats[category.code] || { count: 0, totalStock: 0 }
                 return (
-                  <Select.Option key={category.value} value={category.value}>
-                    <Tag color={category.color} style={{ marginRight: 8 }}>
-                      {category.label}
+                  <Select.Option key={category.categoryId} value={category.code}>
+                    <Tag color="blue" style={{ marginRight: 8 }}>
+                      {category.name}
                     </Tag>
                     {stats.count}개
                   </Select.Option>
@@ -2019,10 +2089,10 @@ const ProductList = () => {
           <Space align="center">
             <Typography.Text strong>현재 필터:</Typography.Text>
             <Tag 
-              color={getCategoryInfo(selectedCategoryFilter, categories)?.color || 'default'}
+              color="blue"
               style={{ fontSize: 14, padding: '4px 12px' }}
             >
-              {getCategoryInfo(selectedCategoryFilter, categories)?.label || selectedCategoryFilter}
+              {(serverCategoriesData?.data || []).find(c => c.code === selectedCategoryFilter)?.name || selectedCategoryFilter}
             </Tag>
             <Typography.Text>
               {filteredProducts.length}개 상품 표시 중
@@ -2276,9 +2346,56 @@ WHERE category IS NULL OR tax_type IS NULL;`}
         </Card>
       )}
       <Card>
+        {selectedProductIds.length > 0 && (
+          <div style={{ marginBottom: 16, padding: '12px 16px', backgroundColor: '#f0f5ff', borderRadius: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Typography.Text strong>
+              {selectedProductIds.length}개 상품 선택됨
+            </Typography.Text>
+            <Space>
+              <Button
+                type="primary"
+                onClick={() => {
+                  Modal.confirm({
+                    title: '상품 활성화',
+                    content: `선택한 ${selectedProductIds.length}개 상품을 활성화하시겠습니까?`,
+                    okText: '활성화',
+                    cancelText: '취소',
+                    onOk: () => {
+                      bulkUpdateActiveStateMutation.mutate({ productIds: selectedProductIds, active: true })
+                    },
+                  })
+                }}
+              >
+                활성화
+              </Button>
+              <Button
+                danger
+                onClick={() => {
+                  Modal.confirm({
+                    title: '상품 비활성화',
+                    content: `선택한 ${selectedProductIds.length}개 상품을 비활성화하시겠습니까?`,
+                    okText: '비활성화',
+                    okButtonProps: { danger: true },
+                    cancelText: '취소',
+                    onOk: () => {
+                      bulkUpdateActiveStateMutation.mutate({ productIds: selectedProductIds, active: false })
+                    },
+                  })
+                }}
+              >
+                비활성화
+              </Button>
+              <Button
+                onClick={() => setSelectedProductIds([])}
+              >
+                선택 해제
+              </Button>
+            </Space>
+          </div>
+        )}
         <div style={{ overflowX: 'auto' }}>
           <Table
-            columns={columns}
+            columns={getColumns()}
             dataSource={filteredProducts}
             rowKey="productId"
             loading={isLoading}
@@ -2314,19 +2431,15 @@ WHERE category IS NULL OR tax_type IS NULL;`}
           </Form.Item>
           <Form.Item
             label="카테고리"
-            name="category"
-            extra="선택사항 (서버가 지원하지 않으면 무시됨)"
+            name="categoryId"
+            extra={serverCategories.length === 0 ? "서버에 등록된 카테고리가 없습니다" : "선택사항"}
           >
             <Select placeholder="카테고리 선택 (선택사항)" allowClear>
-              <Select.Option value="RICE_CAKE">떡</Select.Option>
-              <Select.Option value="CAKE">케이크</Select.Option>
-              <Select.Option value="BREAD">빵</Select.Option>
-              <Select.Option value="COOKIE">쿠키</Select.Option>
-              <Select.Option value="CHOCOLATE">초콜릿</Select.Option>
-              <Select.Option value="ICE_CREAM">아이스크림</Select.Option>
-              <Select.Option value="BEVERAGE">음료</Select.Option>
-              <Select.Option value="GIFT_SET">선물세트</Select.Option>
-              <Select.Option value="OTHER">기타</Select.Option>
+              {serverCategories.filter((cat: AdminCategoryRow) => cat.active).map((cat: AdminCategoryRow) => (
+                <Select.Option key={cat.categoryId} value={cat.categoryId}>
+                  {cat.name}
+                </Select.Option>
+              ))}
             </Select>
           </Form.Item>
           <Form.Item
@@ -2451,7 +2564,7 @@ WHERE category IS NULL OR tax_type IS NULL;`}
         title={`주문 생성 - ${selectedProductForOrder?.name}`}
         open={isOrderModalOpen}
         onOk={() => {
-          orderForm.validateFields().then((_values) => {
+          orderForm.validateFields().then(() => {
             message.info('주문 생성 기능은 고객 프로필 페이지에서 제공됩니다.')
             setIsOrderModalOpen(false)
             orderForm.resetFields()
@@ -2552,12 +2665,12 @@ WHERE category IS NULL OR tax_type IS NULL;`}
           </Form.Item>
           <Form.Item
             label="카테고리"
-            name="category"
+            name="categoryId"
           >
-            <Select placeholder="카테고리 선택 (선택)">
-              {categories.filter(cat => cat.active !== false).map(cat => (
-                <Select.Option key={cat.value} value={cat.value}>
-                  {cat.label}
+            <Select placeholder="카테고리 선택 (선택)" allowClear>
+              {serverCategories.filter((cat: AdminCategoryRow) => cat.active).map((cat: AdminCategoryRow) => (
+                <Select.Option key={cat.categoryId} value={cat.categoryId}>
+                  {cat.name}
                 </Select.Option>
               ))}
             </Select>

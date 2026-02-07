@@ -42,12 +42,12 @@ const Login = ({ onLogin }: LoginProps) => {
       <Card
         style={{
           width: '100%',
-          maxWidth: 400,
+          maxWidth: 500,
           borderRadius: 16,
           boxShadow: '0 20px 60px rgba(0, 0, 0, 0.3)',
           border: 'none',
         }}
-        bodyStyle={{ padding: '40px 32px' }}
+        bodyStyle={{ padding: '48px 40px' }}
       >
         <div style={{ textAlign: 'center', marginBottom: 32 }}>
           <div

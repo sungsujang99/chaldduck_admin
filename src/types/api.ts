@@ -74,6 +74,7 @@ export interface OrderCreateRequest {
 
 export interface OrderItemResponse {
   orderItemId: number;
+  productId?: number; // 상품 ID (매입가 조회용)
   productName: string;
   unitPrice: number;
   quantity: number;
@@ -89,11 +90,16 @@ export interface OrderResponse {
   customerId: number;
   orderNo: string;
   status: OrderStatus;
+  orderedAt?: string; // 주문 시각
+  canceledBy?: 'CUSTOMER' | 'SYSTEM' | 'ADMIN';
+  cancelReason?: string;
+  canceledAt?: string;
   recipientName: string;
   recipientPhone: string;
   zipCode: string;
   address1: string;
   address2: string;
+  address3?: string; // 건물명
   subtotalAmount: number;
   deliveryFee: number;
   discountAmount: number;
@@ -103,9 +109,10 @@ export interface OrderResponse {
   fulfillmentType: FulfillmentType;
   deliveryStatus: DeliveryStatus;
   trackingNo?: string;
+  paymentMethod?: PaymentMethod;
+  active?: boolean;
+  deletedAt?: string;
   items: OrderItemResponse[];
-  createdAt?: string;
-  updatedAt?: string;
 }
 
 // Payment types
@@ -219,6 +226,9 @@ export interface AdminProductStockRow {
   active?: boolean;
   deletedAt?: string;
   category?: ProductCategory;
+  categoryId?: number;    // 서버에서 반환하는 카테고리 ID
+  categoryCode?: string;  // 서버에서 반환하는 카테고리 코드
+  categoryName?: string;  // 서버에서 반환하는 카테고리 이름
   taxType?: TaxType;
   sortOrder?: number;
 }
@@ -239,8 +249,26 @@ export interface ProductCreateRequest {
   initialStockQty: number;
   safetyStock: number;
   purchasePrice?: number;
-  category?: ProductCategory;
+  categoryId?: number;  // 카테고리 ID (숫자)
   taxType?: TaxType;
+}
+
+// 카테고리 관련 타입
+export interface AdminCategoryRow {
+  categoryId: number;
+  code: string;
+  name: string;
+  active: boolean;
+  sortOrder: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface AdminCategoryCreateRequest {
+  code: string;
+  name: string;
+  active?: boolean;
+  sortOrder?: number;
 }
 
 export interface StockUpdateRequest {
@@ -561,7 +589,7 @@ export interface OrderCancelRequest {
 }
 
 // Feature Flag types
-export type FeatureKey = 'ORDER' | 'BANK_TRANSFER';
+export type FeatureKey = 'ORDER' | 'DELIVERY_ORDER';
 
 export interface FeatureFlagResponse {
   key: FeatureKey;

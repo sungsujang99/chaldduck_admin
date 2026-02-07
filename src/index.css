@@ -100,3 +100,42 @@ body {
     max-width: 150px;
   }
 }
+
+/* 드래그 앤 드롭 스타일 */
+.dragging {
+  opacity: 0.5;
+  background: #f0f0f0;
+}
+
+.drag-overlay {
+  cursor: move;
+}
+
+.sortable-item {
+  cursor: move;
+  transition: background-color 0.2s;
+}
+
+.sortable-item:hover {
+  background-color: #f5f5f5;
+}
+
+/* 테이블 컬럼 리사이징 핸들 스타일 */
+.react-resizable {
+  position: relative;
+}
+
+.react-resizable-handle {
+  position: absolute;
+  width: 10px;
+  height: 100%;
+  bottom: 0;
+  right: -5px;
+  cursor: col-resize;
+  z-index: 1;
+}
+
+.react-resizable-handle:hover {
+  background-color: #1890ff;
+  opacity: 0.3;
+}

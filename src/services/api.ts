@@ -23,6 +23,8 @@ import type {
   AdminProductStockRow,
   StockUpdateRequest,
   ProductReorderRequest,
+  AdminCategoryRow,
+  AdminCategoryCreateRequest,
   ShippingPolicy,
   ShippingPolicyCreateRequest,
   ShippingPolicyResponse,
@@ -416,6 +418,11 @@ class ApiService {
     }
   }
 
+  async deleteOrder(orderId: number): Promise<JsonBody<void>> {
+    const response = await this.client.delete(`/api/v1/admin/orders/${orderId}`);
+    return response.data;
+  }
+
   async createOrder(
     customerId: number,
     addressId: number,
@@ -535,6 +542,31 @@ class ApiService {
     return response.data;
   }
 
+  // Product Category APIs
+  async getAdminCategories(): Promise<JsonBody<AdminCategoryRow[]>> {
+    const response = await this.client.get('/api/v1/admin/product-categories');
+    return response.data;
+  }
+
+  async createCategory(data: AdminCategoryCreateRequest): Promise<JsonBody<AdminCategoryRow>> {
+    const response = await this.client.post('/api/v1/admin/product-categories', data);
+    return response.data;
+  }
+
+  async updateCategory(categoryId: number, data: Partial<AdminCategoryCreateRequest>): Promise<JsonBody<AdminCategoryRow>> {
+    console.log('[updateCategory] 요청:', categoryId, data);
+    const response = await this.client.patch(`/api/v1/admin/product-categories/${categoryId}`, data);
+    console.log('[updateCategory] 응답:', response.data);
+    return response.data;
+  }
+
+  async deleteCategory(categoryId: number): Promise<JsonBody<void>> {
+    console.log('[deleteCategory] 삭제 요청:', categoryId);
+    const response = await this.client.delete(`/api/v1/admin/product-categories/${categoryId}`);
+    console.log('[deleteCategory] 삭제 완료:', response.data);
+    return response.data;
+  }
+
   // Product APIs
   async getProducts(): Promise<JsonBody<AdminProductStockRow[]>> {
     const response = await this.client.get('/api/v1/admin/products');
@@ -542,8 +574,19 @@ class ApiService {
   }
 
   async createProduct(data: ProductCreateRequest): Promise<JsonBody<AdminProductStockRow>> {
-    const response = await this.client.post('/api/v1/admin/products', data);
-    return response.data;
+    console.log('[createProduct] 요청 데이터:', JSON.stringify(data, null, 2));
+    try {
+      const response = await this.client.post('/api/v1/admin/products', data);
+      console.log('[createProduct] 성공:', response.data);
+      return response.data;
+    } catch (error: any) {
+      console.error('[createProduct] 에러:', {
+        status: error.response?.status,
+        data: error.response?.data,
+        message: error.message,
+      });
+      throw error;
+    }
   }
 
   async updateProductStock(
