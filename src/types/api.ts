@@ -70,6 +70,7 @@ export interface OrderCreateRequest {
   paymentMethod: PaymentMethod;
   items: OrderItemCreateRequest[];
   cashReceipt?: boolean;
+  cashReceiptNo?: string; // 현금영수증 식별번호 (휴대폰번호/사업자번호)
 }
 
 export interface OrderItemResponse {
@@ -108,6 +109,7 @@ export interface OrderResponse {
   cashReceiptNo?: string;
   fulfillmentType: FulfillmentType;
   deliveryStatus: DeliveryStatus;
+  carrier?: string; // 택배사
   trackingNo?: string;
   paymentMethod?: PaymentMethod;
   active?: boolean;
@@ -271,6 +273,26 @@ export interface AdminCategoryCreateRequest {
   sortOrder?: number;
 }
 
+export interface AdminCategoryUpdateRequest {
+  name?: string;
+  active?: boolean;
+  sortOrder?: number;
+}
+
+// 공지사항 관련 타입
+export type NoticeType = 'ORDER_FORM' | 'DEPOSIT_CONFIRMATION';
+
+export interface NoticeResponse {
+  noticeId: number;
+  type: NoticeType;
+  content: string;
+}
+
+export interface NoticeUpsertRequest {
+  type: NoticeType;
+  content: string;
+}
+
 export interface StockUpdateRequest {
   stockQty: number;
   safetyStock: number;
@@ -278,11 +300,12 @@ export interface StockUpdateRequest {
 }
 
 export interface ProductUpdateRequest {
-  purchasePrice?: number;
+  name?: string;
   price?: number;
-  stockQty?: number;
-  safetyStock?: number;
+  categoryId?: number;
+  taxType?: TaxType;
   active?: boolean;
+  purchasePrice?: number; // 매입가 (관리자 전용)
 }
 
 // 하위 호환성을 위해 기존 타입 유지
@@ -581,7 +604,8 @@ export interface PageStockHistory {
 
 // Order Delivery types
 export interface OrderDeliveryStartRequest {
-  trackingNo: string;
+  carrier: string; // 택배사
+  trackingNo?: string; // 운송장 번호
 }
 
 export interface OrderCancelRequest {

@@ -1,6 +1,7 @@
 {
   "projects": {
-    "default": "chaldduck-admin-43f9a"
+    "default": "chaldduck-admin-43f9a",
+    "chanldduck-admin": "chaldduck-admin"
   },
   "targets": {},
   "etags": {}

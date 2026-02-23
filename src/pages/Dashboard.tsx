@@ -6,7 +6,7 @@ import * as XLSX from 'xlsx'
 import dayjs, { Dayjs } from 'dayjs'
 import { useNavigate } from 'react-router-dom'
 import { apiService } from '@/services/api'
-import type { FeatureFlagResponse, FeatureKey, OrderResponse, SalesStatRow } from '@/types/api'
+import type { FeatureFlagResponse, FeatureKey, OrderResponse, OrderItemResponse, SalesStatRow } from '@/types/api'
 
 // const { RangePicker } = DatePicker // 현재 사용하지 않음
 
@@ -138,17 +138,17 @@ const Dashboard = () => {
             let isLastPage = true
             
             if (response.data) {
-              // 배열인 경우 (JsonBodyListOrderResponse)
+              // 배열인 경우 - 100개 미만이면 마지막, 100개면 다음 페이지 시도
               if (Array.isArray(response.data)) {
                 orders = response.data
-                isLastPage = true // 배열 응답은 한번에 전체를 반환
-                console.log(`[Dashboard] 배열 응답: ${orders.length}개`)
-              } 
+                isLastPage = orders.length < pageSize
+                console.log(`[Dashboard] 배열 응답: ${orders.length}개, isLastPage: ${isLastPage}`)
+              }
               // 페이지네이션 객체인 경우
               else if (response.data.content) {
                 orders = response.data.content
-                isLastPage = response.data.last || orders.length < pageSize
-                console.log(`[Dashboard] 페이지네이션 응답: ${orders.length}개, last: ${response.data.last}`)
+                isLastPage = response.data.last === true || orders.length < pageSize
+                console.log(`[Dashboard] 페이지네이션 응답: ${orders.length}개, last: ${response.data.last}, isLastPage: ${isLastPage}`)
               }
             }
             
@@ -228,7 +228,6 @@ const Dashboard = () => {
         canceled: 0,
         // 추가 통계
         waitingPayment: 0, // 입금대기 (CREATED)
-        newOrder: 0, // 신규주문 (PAID)
         pickupWaiting: 0, // 픽업대기 (PICKUP + CONFIRMED)
         deliveryReady: 0, // 배송준비 (DELIVERY + CONFIRMED, deliveryStatus: READY)
         delivering: 0, // 배송중 (deliveryStatus: DELIVERING)
@@ -245,7 +244,6 @@ const Dashboard = () => {
       canceled: orders.filter((o) => o.status === 'CANCELED').length,
       // 추가 통계
       waitingPayment: orders.filter((o) => o.status === 'CREATED').length, // 입금대기
-      newOrder: orders.filter((o) => o.status === 'PAID').length, // 신규주문 (결제완료)
       pickupWaiting: orders.filter((o) => o.fulfillmentType === 'PICKUP' && o.status === 'CONFIRMED').length, // 픽업대기
       deliveryReady: orders.filter((o) => o.fulfillmentType === 'DELIVERY' && (o.status === 'CONFIRMED' || o.status === 'PAID') && o.deliveryStatus === 'READY').length, // 배송준비
       delivering: orders.filter((o) => o.deliveryStatus === 'DELIVERING').length, // 배송중
@@ -463,6 +461,35 @@ const Dashboard = () => {
       // 상품 목록 조회 (매입가 매칭용)
       const productsResponse = await apiService.getProducts()
       console.log('[Dashboard Excel Debug] 조회된 상품 목록:', productsResponse.data)
+
+      // 할인 정책 조회 (픽업 할인가 계산용)
+      message.loading({ content: '할인 정책 조회 중...', key: 'excel-discounts' })
+      const discountPoliciesResponse = await apiService.getDiscountPolicies()
+      const activePolicy = discountPoliciesResponse.data?.find(p => p.active)
+      const discountRules = activePolicy?.rules || []
+      console.log('[Dashboard Excel Debug] 할인 규칙:', discountRules)
+      message.destroy('excel-discounts')
+      
+      // 픽업 할인 규칙 찾기 헬퍼 함수 (PICKUP applyScope)
+      const getPickupDiscountRule = (productId: number) => {
+        return discountRules.find(
+          (rule: any) =>
+            rule.targetProductId === productId &&
+            rule.active &&
+            rule.applyScope === 'PICKUP'
+        )
+      }
+      // 픽업 할인가 계산 (FIXED: amountOff, RATE: discountRate)
+      const calcPickupPrice = (unitPrice: number, quantity: number, rule: any): number => {
+        if (!rule) return unitPrice * quantity
+        if (rule.amountOff != null) {
+          return Math.max(0, (unitPrice - rule.amountOff) * quantity)
+        }
+        if (rule.discountRate != null) {
+          return Math.floor(unitPrice * (1 - rule.discountRate / 100) * quantity)
+        }
+        return unitPrice * quantity
+      }
       
       // productId로 매칭하는 Map
       const productsMapById = new Map(
@@ -478,21 +505,27 @@ const Dashboard = () => {
       message.loading({ content: '엑셀 파일 생성 중...', key: 'excel' })
       const orders = ordersStatsData.data
 
-      // 각 주문의 결제 정보 조회
-      const ordersWithPayment = await Promise.all(
-        orders.map(async (order) => {
-          let paymentMethod = ''
-          try {
-            const paymentResponse = await apiService.getPaymentByOrder(order.orderId)
-            if (paymentResponse?.data) {
-              paymentMethod = paymentResponse.data.method
+      // 각 주문의 결제 정보 조회 (배치 처리)
+      const BATCH = 30
+      const ordersWithPayment: any[] = []
+      for (let i = 0; i < orders.length; i += BATCH) {
+        const batch = orders.slice(i, i + BATCH)
+        const batchResults = await Promise.all(
+          batch.map(async (order: any) => {
+            let paymentMethod = ''
+            try {
+              const paymentResponse = await apiService.getPaymentByOrder(order.orderId)
+              if (paymentResponse?.data) {
+                paymentMethod = paymentResponse.data.method
+              }
+            } catch {
+              // 결제 정보가 없으면 무시
             }
-          } catch {
-            // 결제 정보가 없으면 무시
-          }
-          return { ...order, paymentMethod }
-        })
-      )
+            return { ...order, paymentMethod }
+          })
+        )
+        ordersWithPayment.push(...batchResults)
+      }
 
       // 엑셀 데이터 준비 - 상품별로 한 줄씩
       const excelData: any[] = []
@@ -506,7 +539,7 @@ const Dashboard = () => {
         const { address: cleanAddress, entranceCode } = extractEntranceCode(fullAddress)
         
         // 각 상품별로 개별 행 생성
-        items.forEach((item) => {
+        items.forEach((item: OrderItemResponse, itemIndex: number) => {
           let purchasePriceUnit = 0
           const productId = item.productId
           const productName = item.productName
@@ -522,11 +555,28 @@ const Dashboard = () => {
           }
           
           const quantity = item.quantity || 0
-          const salesUnitPrice = item.unitPrice || 0  // 매출단가 (판매 단가)
+          // lineTotal = 실제 청구액 (할인 반영됨)
+          const itemSalesPrice = item.lineTotal ?? (item.unitPrice || 0) * quantity  // 매출가 = 할인 적용된 실제 금액
+          const salesUnitPrice = quantity > 0 ? Math.round(itemSalesPrice / quantity) : (item.unitPrice || 0)  // 적용단가
           const itemPurchasePrice = purchasePriceUnit * quantity  // 매입가 = 매입단가 * 수량
-          const itemSalesPrice = salesUnitPrice * quantity  // 매출가 = 매출단가 * 수량
+
+          // 픽업 할인가 (참고용) - 픽업 주문은 이미 할인 적용됨, 배송 주문은 픽업 시 할인가 참고
+          let pickupPrice: number | string = '-'
+          if (order.fulfillmentType === 'PICKUP') {
+            pickupPrice = itemSalesPrice  // 픽업 주문: 매출가 = 이미 픽업 할인 적용된 금액
+          } else if (productId) {
+            const pickupRule = getPickupDiscountRule(productId)
+            if (pickupRule) {
+              pickupPrice = calcPickupPrice(item.unitPrice || 0, quantity, pickupRule)
+            }
+          }
           
-          console.log(`[Dashboard Excel Debug] 상품명=${productName}, productId=${productId}, 수량=${quantity}, 매출단가=${salesUnitPrice}, 매출가=${itemSalesPrice}, 매입가=${itemPurchasePrice}`)
+          // 주문별 할인/최종금액은 첫 번째 상품 행에만 표시
+          const orderDiscount = itemIndex === 0 ? (order.discountAmount || 0) : ''
+          const orderFinalAmount = itemIndex === 0 ? (order.finalAmount || 0) : ''
+          const deliveryFee = itemIndex === 0 ? (order.deliveryFee || 0) : ''
+          
+          console.log(`[Dashboard Excel Debug] 상품명=${productName}, 매출가(실제)=${itemSalesPrice}, 픽업가=${pickupPrice}, 할인=${order.discountAmount}, 최종=${order.finalAmount}`)
           
           excelData.push({
             '년월일': order.orderedAt ? dayjs(order.orderedAt).format('YYYY-MM-DD') : '-',
@@ -536,9 +586,12 @@ const Dashboard = () => {
             '전화번호': formatPhoneNumber(order.recipientPhone),
             '상품명': productName || '-',
             '수량': quantity,
-            '단가': salesUnitPrice,  // 매출단가
-            '매출가': itemSalesPrice,
-            '배송비': order.deliveryFee || 0,
+            '단가': salesUnitPrice,  // 할인 적용된 단가
+            '매출가': itemSalesPrice,  // 할인 적용된 실제 금액 (lineTotal)
+            '픽업가': pickupPrice,
+            '할인금액': orderDiscount,  // 주문 전체 할인
+            '배송비': deliveryFee,
+            '최종금액': orderFinalAmount,  // 주문 최종 결제액
             '배송지주소': cleanAddress || '-',
             '공동현관/입구비번': entranceCode || '-',
             '매입가': itemPurchasePrice > 0 ? itemPurchasePrice : '-',
@@ -563,7 +616,10 @@ const Dashboard = () => {
         { wch: 8 },   // 수량
         { wch: 12 },  // 단가
         { wch: 12 },  // 매출가
+        { wch: 12 },  // 픽업가
+        { wch: 12 },  // 할인금액
         { wch: 10 },  // 배송비
+        { wch: 12 },  // 최종금액
         { wch: 50 },  // 배송지주소
         { wch: 20 },  // 공동현관/입구비번
         { wch: 12 },  // 매입가
@@ -813,30 +869,6 @@ const Dashboard = () => {
             >
               <div style={{ fontSize: 13, color: '#1890ff', marginBottom: 8 }}>입금대기</div>
               <div style={{ fontSize: 24, fontWeight: 700, color: '#1890ff' }}>{orderStats.waitingPayment}</div>
-            </div>
-            
-            {/* 신규주문 */}
-            <div 
-              onClick={() => handleGoToOrders('PAID')}
-              style={{ 
-                padding: 16, 
-                borderRadius: 8, 
-                backgroundColor: '#f6ffed',
-                textAlign: 'center',
-                cursor: 'pointer',
-                transition: 'transform 0.2s, box-shadow 0.2s',
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.transform = 'translateY(-2px)'
-                e.currentTarget.style.boxShadow = '0 4px 12px rgba(82, 196, 26, 0.2)'
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.transform = 'translateY(0)'
-                e.currentTarget.style.boxShadow = 'none'
-              }}
-            >
-              <div style={{ fontSize: 13, color: '#52c41a', marginBottom: 8 }}>신규주문</div>
-              <div style={{ fontSize: 24, fontWeight: 700, color: '#52c41a' }}>{orderStats.newOrder}</div>
             </div>
             
             {/* 픽업대기 */}

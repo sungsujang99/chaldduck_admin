@@ -13,6 +13,7 @@ import {
   Modal,
   Form,
   Input,
+  Select,
   Divider,
 } from 'antd'
 import { ArrowLeftOutlined, CheckOutlined, ReloadOutlined } from '@ant-design/icons'
@@ -249,8 +250,8 @@ const OrderDetail = () => {
 
   // 배송 시작 처리 (운송장 번호 입력)
   const updateTrackingNumberMutation = useMutation({
-    mutationFn: async (trackingNo: string) => {
-      return apiService.startDelivery(Number(orderId), { trackingNo })
+    mutationFn: async ({ carrier, trackingNo }: { carrier: string; trackingNo: string }) => {
+      return apiService.startDelivery(Number(orderId), { carrier, trackingNo })
     },
     onSuccess: () => {
       message.success('운송장 번호가 등록되었습니다.')
@@ -350,12 +351,15 @@ const OrderDetail = () => {
     })
   }
 
-  const handleTrackingSubmit = (values: { trackingNumber: string }) => {
-    updateTrackingNumberMutation.mutate(values.trackingNumber.trim())
+  const handleTrackingSubmit = (values: { carrier: string; trackingNumber: string }) => {
+    updateTrackingNumberMutation.mutate({
+      carrier: values.carrier || 'CJ대한통운',
+      trackingNo: values.trackingNumber.trim(),
+    })
   }
 
   const handleOpenTrackingModal = () => {
-    trackingForm.setFieldsValue({ trackingNumber: order?.trackingNo || '' })
+    trackingForm.setFieldsValue({ carrier: order?.carrier || 'CJ대한통운', trackingNumber: order?.trackingNo || '' })
     setIsTrackingModalOpen(true)
   }
 
@@ -584,11 +588,26 @@ const OrderDetail = () => {
       >
         <Form form={trackingForm} layout="vertical" onFinish={handleTrackingSubmit}>
           <Form.Item
-            label="배송번호"
-            name="trackingNumber"
-            rules={[{ required: true, message: '배송번호를 입력해주세요.' }]}
+            label="택배사"
+            name="carrier"
+            initialValue="CJ대한통운"
+            rules={[{ required: true, message: '택배사를 선택해주세요.' }]}
           >
-            <Input placeholder="배송번호를 입력하세요" />
+            <Select placeholder="택배사 선택" options={[
+              { value: 'CJ대한통운', label: 'CJ대한통운' },
+              { value: '우체국택배', label: '우체국택배' },
+              { value: '한진택배', label: '한진택배' },
+              { value: '롯데택배', label: '롯데택배' },
+              { value: '대신택배', label: '대신택배' },
+              { value: '일양로지스', label: '일양로지스' },
+            ]} />
+          </Form.Item>
+          <Form.Item
+            label="운송장번호"
+            name="trackingNumber"
+            rules={[{ required: true, message: '운송장번호를 입력해주세요.' }]}
+          >
+            <Input placeholder="운송장번호를 입력하세요" />
           </Form.Item>
         </Form>
       </Modal>

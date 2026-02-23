@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Card,
@@ -48,7 +48,6 @@ import type {
   DiscountPolicyCreateRequest,
   DiscountPolicyResponse,
   DiscountRuleCreateRequest,
-  ProductUpdateRequest,
   ProductReorderRequest,
   ProductOrderItem,
   AdminCategoryRow,
@@ -191,8 +190,6 @@ const ProductList = () => {
   const [isOrderModalOpen, setIsOrderModalOpen] = useState(false)
   const [selectedProductForOrder, setSelectedProductForOrder] = useState<AdminProductStockRow | null>(null)
   const [orderForm] = Form.useForm()
-  // 상품 전시 상태 관리 (로컬 상태, 재고 0이면 off로 간주)
-  const [productActiveStates, setProductActiveStates] = useState<Record<number, boolean>>({})
   const [isCategoryManagementOpen, setIsCategoryManagementOpen] = useState(false)
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string | 'ALL'>('ALL')
   const [categories] = useState<CategoryInfo[]>(loadCategories())  // 로컬 카테고리 (일부 기능에서 사용)
@@ -229,22 +226,6 @@ const ProductList = () => {
   })
   
   const serverCategories = serverCategoriesData?.data || []
-
-  // 상품 로드 시 초기 active 상태 설정
-  useEffect(() => {
-    if (productsData?.data) {
-      const states: Record<number, boolean> = {}
-      productsData.data.forEach((product) => {
-        // 기존 상태가 없으면 재고 기반으로 설정
-        if (productActiveStates[product.productId] === undefined) {
-          states[product.productId] = product.stockQty > 0
-        }
-      })
-      if (Object.keys(states).length > 0) {
-        setProductActiveStates((prev) => ({ ...prev, ...states }))
-      }
-    }
-  }, [productsData])
 
   // 할인 정책 조회
   const { data: discountPoliciesData, refetch: refetchDiscountPolicies } = useQuery({
@@ -352,19 +333,11 @@ const ProductList = () => {
   const updateStockMutation = useMutation({
     mutationFn: ({ productId, data }: { productId: number; data: StockUpdateRequest }) =>
       apiService.updateProductStock(productId, data),
-    onSuccess: (_, variables) => {
+    onSuccess: () => {
       message.success('재고가 수정되었습니다.')
       setIsStockModalOpen(false)
       setEditingProduct(null)
       stockForm.resetFields()
-      
-      // 재고가 0으로 설정되면 전시 OFF, 아니면 ON으로 상태 업데이트
-      if (variables.data.stockQty !== undefined) {
-        setProductActiveStates((prev) => ({
-          ...prev,
-          [variables.productId]: variables.data.stockQty! > 0,
-        }))
-      }
       
       queryClient.invalidateQueries({ queryKey: ['products'] })
     },
@@ -373,6 +346,21 @@ const ProductList = () => {
     },
   })
 
+  // 상품 전시 ON/OFF (active 토글)
+  const toggleProductDisplayMutation = useMutation({
+    mutationFn: ({ productId, active }: { productId: number; active: boolean }) => 
+      apiService.updateProduct(productId, { active }),
+    onSuccess: (_, variables: { productId: number; active: boolean }) => {
+      message.success(variables.active ? '상품이 전시되었습니다.' : '상품이 숨겨졌습니다.')
+      queryClient.invalidateQueries({ queryKey: ['products'] })
+      refetch()
+    },
+    onError: (error: any) => {
+      message.error(error.response?.data?.message || '상품 전시 상태 변경에 실패했습니다.')
+    },
+  })
+
+  // 상품 삭제 (soft delete)
   const deleteProductMutation = useMutation({
     mutationFn: (productId: number) => apiService.deleteProduct(productId),
     onSuccess: () => {
@@ -381,31 +369,56 @@ const ProductList = () => {
       refetch()
     },
     onError: (error: any) => {
-      console.error('[ProductList] 상품 삭제 에러 상세:', {
-        status: error.response?.status,
-        statusText: error.response?.statusText,
-        responseData: error.response?.data,
-        message: error.message,
-        fullError: error,
-      });
-      
-      let errorMessage = '상품 삭제에 실패했습니다.';
-      if (error.response?.data?.message) {
-        errorMessage = error.response.data.message;
-      } else if (error.response?.status === 404) {
-        errorMessage = '상품을 찾을 수 없습니다.';
-      } else if (error.response?.status === 500) {
-        errorMessage = '서버 오류가 발생했습니다. 서버 관리자에게 문의해주세요.';
-      } else if (error.message) {
-        errorMessage = error.message;
-      }
-      
-      message.error({
-        content: errorMessage,
-        duration: 5,
-      });
+      message.error(error.response?.data?.message || '상품 삭제에 실패했습니다.')
     },
   })
+
+  const handleToggleProductDisplay = (productId: number, productName: string, currentActive: boolean) => {
+    const action = currentActive ? '숨기기' : '전시하기'
+    const description = currentActive 
+      ? '상품을 숨기면 고객에게 보이지 않습니다. (재고는 유지됩니다)'
+      : '상품을 전시하면 고객에게 다시 보입니다.'
+    
+    Modal.confirm({
+      title: `상품 ${action}`,
+      icon: <ExclamationCircleOutlined />,
+      content: (
+        <div>
+          <p><strong>"{productName}"</strong> 상품을 {action}시겠습니까?</p>
+          <p style={{ color: currentActive ? '#faad14' : '#52c41a', fontSize: 12 }}>
+            {description}
+          </p>
+        </div>
+      ),
+      okText: action,
+      cancelText: '취소',
+      okButtonProps: { danger: currentActive },
+      onOk: () => {
+        toggleProductDisplayMutation.mutate({ productId, active: !currentActive })
+      },
+    })
+  }
+
+  const handleDeleteProduct = (productId: number, productName: string) => {
+    Modal.confirm({
+      title: '상품 삭제',
+      icon: <ExclamationCircleOutlined />,
+      content: (
+        <div>
+          <p><strong>"{productName}"</strong> 상품을 삭제하시겠습니까?</p>
+          <p style={{ color: '#ff4d4f', fontSize: 12 }}>
+            ⚠️ 삭제된 상품은 목록에서 숨겨지며, 데이터베이스에는 보관됩니다.
+          </p>
+        </div>
+      ),
+      okText: '삭제',
+      cancelText: '취소',
+      okButtonProps: { danger: true },
+      onOk: () => {
+        deleteProductMutation.mutate(productId)
+      },
+    })
+  }
 
   // 상품 정보 수정
   const editProductMutation = useMutation({
@@ -421,38 +434,6 @@ const ProductList = () => {
     },
     onError: (error: any) => {
       message.error(error.response?.data?.message || '상품 수정에 실패했습니다.')
-    },
-  })
-
-  // 제품 재고 및 안전재고 업데이트
-  const updateProductMutation = useMutation({
-    mutationFn: async ({ productId, data, currentProduct }: { productId: number; data: ProductUpdateRequest; currentProduct?: AdminProductStockRow }) => {
-      if (data.stockQty !== undefined || data.safetyStock !== undefined) {
-        // 변경되지 않은 필드는 기존 값 유지
-        await apiService.updateProductStock(productId, {
-          stockQty: data.stockQty ?? currentProduct?.stockQty ?? 0,
-          safetyStock: data.safetyStock ?? currentProduct?.safetyStock ?? 0,
-        })
-      }
-      return { status: 200, message: 'OK', data: { productId, ...data } }
-    },
-    onSuccess: (response) => {
-      message.success('재고가 수정되었습니다.')
-      setEditingCell(null)
-      setEditingValue('')
-      
-      // 재고가 0으로 설정되면 전시 OFF, 아니면 ON으로 상태 업데이트
-      if (response.data.stockQty !== undefined && response.data.stockQty !== null) {
-        setProductActiveStates((prev) => ({
-          ...prev,
-          [response.data.productId]: (response.data.stockQty ?? 0) > 0,
-        }))
-      }
-      
-      queryClient.invalidateQueries({ queryKey: ['products'] })
-    },
-    onError: (error: any) => {
-      message.error(error.response?.data?.message || '재고 수정에 실패했습니다.')
     },
   })
 
@@ -476,72 +457,6 @@ const ProductList = () => {
       message.error(error.response?.data?.message || '상태 변경에 실패했습니다.')
     },
   })
-
-  // 상품 전시 on/off 토글
-  const handleToggleProductActive = (product: AdminProductStockRow, newActiveState: boolean) => {
-    const currentActiveState = productActiveStates[product.productId] ?? (product.stockQty > 0)
-
-    if (!newActiveState && currentActiveState) {
-      // OFF로 전환: 재고를 0으로 설정
-      Modal.confirm({
-        title: '상품 전시 OFF',
-        content: `"${product.name}" 상품을 전시 OFF 하시겠습니까?\n재고가 0으로 설정되어 주문이 불가능해집니다.`,
-        okText: '전시 OFF',
-        cancelText: '취소',
-        okButtonProps: { danger: true },
-        onOk: () => {
-          updateStockMutation.mutate({
-            productId: product.productId,
-            data: {
-              stockQty: 0,
-              safetyStock: product.safetyStock,
-              memo: '상품 전시 OFF - 관리자 설정',
-            },
-          })
-          setProductActiveStates((prev) => ({ ...prev, [product.productId]: false }))
-        },
-      })
-    } else if (newActiveState && !currentActiveState) {
-      // ON으로 전환: 재고 입력 받기
-      let stockQty: number | undefined
-      Modal.confirm({
-        title: '상품 전시 ON',
-        content: (
-          <div>
-            <p>"{product.name}" 상품을 전시 ON 하시겠습니까?</p>
-            <p style={{ marginTop: 16, marginBottom: 8 }}>재고 수량을 입력하세요:</p>
-            <InputNumber
-              min={1}
-              defaultValue={10}
-              style={{ width: '100%' }}
-              onChange={(value) => {
-                stockQty = value ?? undefined
-              }}
-              placeholder="재고 수량 입력"
-            />
-          </div>
-        ),
-        okText: '전시 ON',
-        cancelText: '취소',
-        onOk: () => {
-          if (!stockQty || stockQty <= 0) {
-            message.error('재고 수량을 1 이상 입력해주세요.')
-            return Promise.reject()
-          }
-          updateStockMutation.mutate({
-            productId: product.productId,
-            data: {
-              stockQty: stockQty,
-              safetyStock: product.safetyStock,
-              memo: '상품 전시 ON - 관리자 설정',
-            },
-          })
-          setProductActiveStates((prev) => ({ ...prev, [product.productId]: true }))
-          return Promise.resolve()
-        },
-      })
-    }
-  }
 
   // 할인 정책 생성
   const createDiscountPolicyMutation = useMutation({
@@ -732,28 +647,6 @@ const ProductList = () => {
       
       console.log('[handleModalOk] 상품 등록 요청 데이터:', JSON.stringify(requestData, null, 2))
       createProductMutation.mutate(requestData)
-    })
-  }
-
-  const handleDeleteProduct = (productId: number, productName: string) => {
-    Modal.confirm({
-      title: '상품 삭제',
-      icon: <ExclamationCircleOutlined />,
-      content: (
-        <div>
-          <p><strong>"{productName}"</strong> 상품을 삭제하시겠습니까?</p>
-          <p style={{ color: '#ff4d4f', fontSize: 12 }}>
-            ⚠️ 이 작업은 되돌릴 수 없습니다. (Soft delete로 처리됩니다)
-          </p>
-        </div>
-      ),
-      okText: '삭제',
-      cancelText: '취소',
-      okButtonProps: { danger: true },
-      onOk: () => {
-        console.log(`[ProductList] 상품 삭제 시도: ID=${productId}, Name=${productName}`)
-        deleteProductMutation.mutate(productId)
-      },
     })
   }
 
@@ -1312,30 +1205,30 @@ const ProductList = () => {
       return
     }
 
-    // 재고/안전재고 수정 로직
-    const updateData: ProductUpdateRequest = {}
-
-    switch (field) {
-      case 'stockQty':
-        if (isNaN(numValue) || numValue < 0) {
-          message.error('올바른 재고 수량을 입력해주세요.')
-          return
-        }
-        updateData.stockQty = numValue
-        break
-      case 'safetyStock':
-        if (isNaN(numValue) || numValue < 0) {
-          message.error('올바른 안전재고를 입력해주세요.')
-          return
-        }
-        updateData.safetyStock = numValue
-        break
-      default:
+    // 재고/안전재고 수정 로직 (별도 API 사용)
+    if (field === 'stockQty' || field === 'safetyStock') {
+      if (isNaN(numValue) || numValue < 0) {
+        message.error(`올바른 ${field === 'stockQty' ? '재고 수량' : '안전재고'}을 입력해주세요.`)
         return
-    }
+      }
 
-    // 현재 상품 정보를 함께 전달하여 변경되지 않은 필드는 기존 값 유지
-    updateProductMutation.mutate({ productId, data: updateData, currentProduct: product })
+      const updateData: StockUpdateRequest = {
+        stockQty: field === 'stockQty' ? numValue : product.stockQty,
+        safetyStock: field === 'safetyStock' ? numValue : product.safetyStock,
+        memo: `${field === 'stockQty' ? '재고' : '안전재고'} 수정 (인라인 편집)`,
+      }
+
+      apiService.updateProductStock(productId, updateData).then(() => {
+        message.success(`${field === 'stockQty' ? '재고' : '안전재고'}가 수정되었습니다.`)
+        setEditingCell(null)
+        setEditingValue('')
+        queryClient.invalidateQueries({ queryKey: ['products'] })
+        refetch()
+      }).catch((error: any) => {
+        message.error(error.response?.data?.message || '재고 수정에 실패했습니다.')
+      })
+      return
+    }
   }
 
   // 셀 편집 취소
@@ -1439,9 +1332,10 @@ const ProductList = () => {
     }
     return (
       <span
+        onClick={() => handleCellDoubleClick(productId, field, value ?? 0)}
         onDoubleClick={() => handleCellDoubleClick(productId, field, value ?? 0)}
-        style={{ cursor: 'pointer', padding: '4px 8px', display: 'inline-block' }}
-        title="더블클릭하여 수정"
+        style={{ cursor: 'pointer', padding: '4px 8px', display: 'inline-block', minWidth: 40, minHeight: 24 }}
+        title="클릭하여 수정"
       >
         {customRenderer ? (
           customRenderer(value)
@@ -1727,30 +1621,44 @@ const ProductList = () => {
       key: 'stockQty',
       width: 100,
       render: (value: number, record: AdminProductStockRow) => {
-        const isActive = productActiveStates[record.productId] ?? (record.stockQty > 0)
         const isEditing = editingCell?.productId === record.productId && editingCell?.field === 'stockQty'
         
-        // 전시 OFF 상태면 재고를 0으로 표시하고 편집 불가
-        if (!isActive) {
+        if (isEditing) {
           return (
-            <Tooltip title="전시 OFF 상태 - 전시 ON으로 전환하면 재고를 설정할 수 있습니다">
-              <span style={{ color: '#999' }}>
-                0 (OFF)
-              </span>
-            </Tooltip>
+            <Input
+              type="number"
+              value={editingValue}
+              onChange={(e) => setEditingValue(e.target.value)}
+              onPressEnter={() => handleCellSave(record.productId, 'stockQty')}
+              onBlur={() => handleCellSave(record.productId, 'stockQty')}
+              autoFocus
+              style={{ width: '100%' }}
+            />
           )
         }
         
-        return renderEditableCell(
-          record.productId,
-          'stockQty',
-          value,
-          isEditing,
-          () => handleCellSave(record.productId, 'stockQty'),
-          handleCellCancel
+        return (
+          <span
+            onClick={() => handleCellDoubleClick(record.productId, 'stockQty', value)}
+            style={{ cursor: 'pointer', textDecoration: 'underline' }}
+          >
+            {value}
+          </span>
         )
       },
       align: 'right' as const,
+    },
+    {
+      title: '전시상태',
+      dataIndex: 'active',
+      key: 'active',
+      width: 100,
+      render: (active: boolean) => (
+        <Tag color={active !== false ? 'green' : 'red'}>
+          {active !== false ? '전시중' : '숨김'}
+        </Tag>
+      ),
+      align: 'center' as const,
     },
     {
       title: '안전재고',
@@ -1773,17 +1681,19 @@ const ProductList = () => {
     {
       title: '전시',
       dataIndex: 'active',
-      key: 'active',
+      key: 'display',
       width: 100,
       render: (_value: boolean | undefined, record: AdminProductStockRow) => {
-        const isActive = productActiveStates[record.productId] ?? (record.stockQty > 0)
+        const isActive = record.active !== false
         return (
           <Switch
             checked={isActive}
-            onChange={(checked) => handleToggleProductActive(record, checked)}
+            onChange={() => {
+              handleToggleProductDisplay(record.productId, record.name, isActive)
+            }}
             checkedChildren="ON"
             unCheckedChildren="OFF"
-            loading={updateStockMutation.isPending}
+            loading={toggleProductDisplayMutation.isPending}
           />
         )
       },
@@ -1805,9 +1715,8 @@ const ProductList = () => {
           <Button
             type="link"
             danger
-            icon={<DeleteOutlined />}
-            onClick={() => handleDeleteProduct(record.productId, record.name)}
             size="small"
+            onClick={() => handleDeleteProduct(record.productId, record.name)}
           >
             삭제
           </Button>
@@ -1818,9 +1727,9 @@ const ProductList = () => {
 
   const products = productsData?.data || []
 
-  // 활성 상품만 필터링 (삭제된 상품 제외)
+  // 삭제된 상품만 제외 (숨김 상품은 포함)
   const activeProducts = useMemo(() => {
-    return products.filter(p => p.active !== false && !p.deletedAt)
+    return products.filter(p => !p.deletedAt)
   }, [products])
 
   // 카테고리별 상품 필터링 (서버 categoryCode 기준)
@@ -2055,31 +1964,6 @@ const ProductList = () => {
               </Form>
             </Card>
           )}
-
-          <div>
-            <Typography.Title level={5}>카테고리 필터</Typography.Title>
-            <Select
-              value={selectedCategoryFilter}
-              onChange={setSelectedCategoryFilter}
-              style={{ width: '100%' }}
-              placeholder="카테고리 선택"
-            >
-              <Select.Option value="ALL">
-                전체 ({activeProducts.length}개)
-              </Select.Option>
-              {(serverCategoriesData?.data || []).filter(cat => cat.active).map(category => {
-                const stats = serverCategoryStats[category.code] || { count: 0, totalStock: 0 }
-                return (
-                  <Select.Option key={category.categoryId} value={category.code}>
-                    <Tag color="blue" style={{ marginRight: 8 }}>
-                      {category.name}
-                    </Tag>
-                    {stats.count}개
-                  </Select.Option>
-                )
-              })}
-            </Select>
-          </div>
         </Space>
       </Modal>
 

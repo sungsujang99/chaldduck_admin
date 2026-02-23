@@ -25,6 +25,7 @@ import type {
   ProductReorderRequest,
   AdminCategoryRow,
   AdminCategoryCreateRequest,
+  AdminCategoryUpdateRequest,
   ShippingPolicy,
   ShippingPolicyCreateRequest,
   ShippingPolicyResponse,
@@ -48,9 +49,12 @@ import type {
   CashReceiptNoUpdateRequest,
   PageOrderResponse,
   PageCustomerListResponse,
-  OrderCancelRequest,
   CustomerBlockUpdateRequest,
   SalesStatRow,
+  OrderCancelRequest,
+  NoticeResponse,
+  NoticeUpsertRequest,
+  NoticeType,
 } from '@/types/api';
 
 // 개발 환경에서는 프록시를 사용하므로 빈 문자열, 프로덕션에서는 실제 URL 사용
@@ -548,18 +552,6 @@ class ApiService {
     return response.data;
   }
 
-  async createCategory(data: AdminCategoryCreateRequest): Promise<JsonBody<AdminCategoryRow>> {
-    const response = await this.client.post('/api/v1/admin/product-categories', data);
-    return response.data;
-  }
-
-  async updateCategory(categoryId: number, data: Partial<AdminCategoryCreateRequest>): Promise<JsonBody<AdminCategoryRow>> {
-    console.log('[updateCategory] 요청:', categoryId, data);
-    const response = await this.client.patch(`/api/v1/admin/product-categories/${categoryId}`, data);
-    console.log('[updateCategory] 응답:', response.data);
-    return response.data;
-  }
-
   async deleteCategory(categoryId: number): Promise<JsonBody<void>> {
     console.log('[deleteCategory] 삭제 요청:', categoryId);
     const response = await this.client.delete(`/api/v1/admin/product-categories/${categoryId}`);
@@ -626,13 +618,6 @@ class ApiService {
       console.error('[API] 에러 메시지:', error.message);
       throw error;
     }
-  }
-
-  async reorderProducts(data: ProductReorderRequest): Promise<JsonBody<void>> {
-    console.log('[API] reorderProducts 요청:', JSON.stringify(data, null, 2));
-    const response = await this.client.put('/api/v1/admin/products/reorder', data);
-    console.log('[API] reorderProducts 응답:', response.data);
-    return response.data;
   }
 
   // Policy APIs - Shipping
@@ -875,19 +860,19 @@ class ApiService {
     data: DiscountRuleUpdateRequest
   ): Promise<JsonBody<DiscountRuleResponse>> {
     console.log('[updateDiscountRule] ========== 요청 시작 ==========');
-    console.log('[updateDiscountRule] 요청 URL:', `/api/v1/admin/policies/rules/${ruleId}`);
+    console.log('[updateDiscountRule] 요청 URL:', `/api/v1/admin/policies/discount/rules/${ruleId}`);
     console.log('[updateDiscountRule] 룰 ID:', ruleId);
     console.log('[updateDiscountRule] 요청 데이터 (JSON):', JSON.stringify(data, null, 2));
     console.log('[updateDiscountRule] 요청 데이터 (객체):', data);
     
     try {
-      const response = await this.client.put(`/api/v1/admin/policies/rules/${ruleId}`, data);
+      const response = await this.client.put(`/api/v1/admin/policies/discount/rules/${ruleId}`, data);
       console.log('[updateDiscountRule] 응답 성공:', response.data);
       console.log('[updateDiscountRule] ========== 요청 완료 ==========');
       return response.data;
     } catch (error: any) {
       console.error('[updateDiscountRule] ========== 에러 발생 ==========');
-      console.error('[updateDiscountRule] 요청 URL:', `/api/v1/admin/policies/rules/${ruleId}`);
+      console.error('[updateDiscountRule] 요청 URL:', `/api/v1/admin/policies/discount/rules/${ruleId}`);
       console.error('[updateDiscountRule] 룰 ID:', ruleId);
       console.error('[updateDiscountRule] 요청 데이터 (JSON):', JSON.stringify(data, null, 2));
       console.error('[updateDiscountRule] 요청 데이터 (객체):', data);
@@ -1017,6 +1002,75 @@ class ApiService {
     const response = await this.client.get('/api/v1/admin/sales-stats/monthly', {
       params: { from, to },
     });
+    return response.data;
+  }
+
+  // Admin - Category Management APIs
+  async getCategories(): Promise<JsonBody<AdminCategoryRow[]>> {
+    const response = await this.client.get('/api/v1/admin/product-categories');
+    return response.data;
+  }
+
+  async getActiveCategories(): Promise<JsonBody<AdminCategoryRow[]>> {
+    const response = await this.client.get('/api/v1/admin/product-categories/active');
+    return response.data;
+  }
+
+  async getCategory(categoryId: number): Promise<JsonBody<AdminCategoryRow>> {
+    const response = await this.client.get(`/api/v1/admin/product-categories/${categoryId}`);
+    return response.data;
+  }
+
+  async createCategory(data: AdminCategoryCreateRequest): Promise<JsonBody<AdminCategoryRow>> {
+    const response = await this.client.post('/api/v1/admin/product-categories', data);
+    return response.data;
+  }
+
+  async updateCategory(categoryId: number, data: AdminCategoryUpdateRequest): Promise<JsonBody<AdminCategoryRow>> {
+    const response = await this.client.patch(`/api/v1/admin/product-categories/${categoryId}`, data);
+    return response.data;
+  }
+
+  async deactivateCategory(categoryId: number): Promise<JsonBody<void>> {
+    const response = await this.client.delete(`/api/v1/admin/product-categories/${categoryId}`);
+    return response.data;
+  }
+
+  // Admin - Product Reorder API
+  async reorderProducts(data: ProductReorderRequest): Promise<JsonBody<void>> {
+    const response = await this.client.put('/api/v1/admin/products/reorder', data);
+    return response.data;
+  }
+
+  // Admin - Order Soft Delete/Restore APIs
+  async softDeleteOrder(orderId: number): Promise<JsonBody<void>> {
+    const response = await this.client.delete(`/api/v1/admin/orders/${orderId}`);
+    return response.data;
+  }
+
+  async restoreOrder(orderId: number): Promise<JsonBody<void>> {
+    const response = await this.client.post(`/api/v1/admin/orders/${orderId}/restore`);
+    return response.data;
+  }
+
+  // Admin - Notice Management APIs
+  async getNotices(): Promise<JsonBody<NoticeResponse[]>> {
+    const response = await this.client.get('/api/v1/admin/notices');
+    return response.data;
+  }
+
+  async getNoticeByType(type: NoticeType): Promise<JsonBody<NoticeResponse>> {
+    const response = await this.client.get(`/api/v1/notices/${type}`);
+    return response.data;
+  }
+
+  async upsertNotice(data: NoticeUpsertRequest): Promise<JsonBody<NoticeResponse>> {
+    const response = await this.client.put('/api/v1/admin/notices', data);
+    return response.data;
+  }
+
+  async deleteNotice(type: NoticeType): Promise<JsonBody<void>> {
+    const response = await this.client.delete(`/api/v1/admin/notices/${type}`);
     return response.data;
   }
 }

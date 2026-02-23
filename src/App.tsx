@@ -9,6 +9,8 @@ import OrdersByCustomer from './pages/OrdersByCustomer'
 import OrderList from './pages/OrderList'
 import OrderDetail from './pages/OrderDetail'
 import PolicyManagement from './pages/PolicyManagement'
+import NoticeManagement from './pages/NoticeManagement'
+import NotificationLog from './pages/NotificationLog'
 import Login from './pages/Login'
 
 function App() {
@@ -68,6 +70,8 @@ function App() {
           <Route path="/orders" element={<OrderList />} />
           <Route path="/orders/:orderId" element={<OrderDetail />} />
           <Route path="/policies" element={<PolicyManagement />} />
+          <Route path="/notices" element={<NoticeManagement />} />
+          <Route path="/notifications" element={<NotificationLog />} />
         </Routes>
       </Layout>
     </BrowserRouter>

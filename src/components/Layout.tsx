@@ -10,6 +10,8 @@ import {
   MenuUnfoldOutlined,
   SettingOutlined,
   LogoutOutlined,
+  NotificationOutlined,
+  MessageOutlined,
 } from '@ant-design/icons'
 import type { MenuProps } from 'antd'
 
@@ -78,7 +80,17 @@ const Layout = ({ children, onLogout }: LayoutProps) => {
     {
       key: '/policies',
       icon: <SettingOutlined />,
-      label: '배송비 관리',
+      label: '정책 관리',
+    },
+    {
+      key: '/notices',
+      icon: <NotificationOutlined />,
+      label: '공지사항',
+    },
+    {
+      key: '/notifications',
+      icon: <MessageOutlined />,
+      label: '알림 로그',
     },
   ]
 
@@ -89,6 +101,8 @@ const Layout = ({ children, onLogout }: LayoutProps) => {
     if (path.startsWith('/customers')) return ['/customers']
     if (path.startsWith('/orders')) return ['/orders']
     if (path.startsWith('/policies')) return ['/policies']
+    if (path.startsWith('/notices')) return ['/notices']
+    if (path.startsWith('/notifications')) return ['/notifications']
     return []
   }
 

@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Card, Table, Space, Typography, Tag, Button, Select, Row, Col, Modal, message, Input, Form, Tabs, DatePicker } from 'antd'
 import { ReloadOutlined, EditOutlined, DownloadOutlined } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router-dom'
@@ -126,105 +126,103 @@ const OrderList = () => {
 
   const statusFilter = getStatusFilter(activeTab)
 
-  // 주문 리스트 조회 (전체 주문을 가져와서 클라이언트에서 필터링 및 페이지네이션)
-  const { data: ordersData, isLoading, error, refetch } = useQuery({
-    queryKey: ['allOrders'],
-    queryFn: async () => {
-      try {
-        console.log('[OrderList] 전체 주문 조회 시작');
-        
-        // 모든 주문을 페이징으로 가져오기
-        const allOrders: OrderResponse[] = []
-        let page = 0
-        const fetchPageSize = 100 // 한 번에 많이 가져오기
-        let hasMore = true
+  // 주문 리스트 - 불러와지는 대로 표시 (progressive loading)
+  const [ordersData, setOrdersData] = useState<{ data: (OrderResponse & { paymentMethod?: PaymentMethod })[] } | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
+  const [loadError, setLoadError] = useState<Error | null>(null)
+  const [loadTrigger, setLoadTrigger] = useState(0)
 
-        while (hasMore) {
-          try {
-            const response = await apiService.getAllOrdersAdmin({ page, size: fetchPageSize })
-            console.log(`[OrderList] 페이지 ${page} 응답:`, response)
-            
-            // API 응답 형식 확인 (배열 또는 페이지네이션 객체)
-            let orders: OrderResponse[] = []
-            let isLastPage = true
-            
-            if (response.data) {
-              // 배열인 경우 (JsonBodyListOrderResponse)
-              if (Array.isArray(response.data)) {
-                orders = response.data
-                isLastPage = true // 배열 응답은 한번에 전체를 반환
-                console.log(`[OrderList] 배열 응답: ${orders.length}개`)
-              } 
-              // 페이지네이션 객체인 경우
-              else if (response.data.content) {
-                orders = response.data.content
-                isLastPage = response.data.last || orders.length < fetchPageSize
-                console.log(`[OrderList] 페이지네이션 응답: ${orders.length}개, last: ${response.data.last}`)
-              }
+  const refetch = useCallback(() => {
+    setLoadTrigger((t) => t + 1)
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    setIsLoading(true)
+    setLoadError(null)
+    setOrdersData(null)
+
+    const load = async () => {
+      try {
+        const allOrders: (OrderResponse & { paymentMethod?: PaymentMethod })[] = []
+        let page = 0
+        const fetchPageSize = 100
+
+        // 1) 주문 페이지별로 조회 - 불러올 때마다 바로 표시
+        while (true) {
+          const response = await apiService.getAllOrdersAdmin({ page, size: fetchPageSize })
+          let orders: OrderResponse[] = []
+          let isLastPage = true
+
+          if (response.data) {
+            if (Array.isArray(response.data)) {
+              orders = response.data
+              isLastPage = orders.length < fetchPageSize
+            } else if (response.data.content) {
+              orders = response.data.content
+              isLastPage = response.data.last === true || orders.length < fetchPageSize
             }
-            
-            if (orders.length > 0) {
-              // 첫 번째 주문의 필드 확인 (디버깅용)
-              if (page === 0 && orders[0]) {
-                console.log('[OrderList] 첫 번째 주문 전체 데이터:', orders[0])
-                console.log('[OrderList] orderedAt:', (orders[0] as any).orderedAt)
-              }
-              allOrders.push(...orders)
-              
-              if (isLastPage) {
-                hasMore = false
-              } else {
-                page++
-              }
-            } else {
-              hasMore = false
-            }
-          } catch (err: any) {
-            console.error(`[OrderList] 주문 조회 실패 (페이지 ${page}):`, err.message, err)
-            hasMore = false
           }
+
+          if (orders.length === 0) break
+          if (cancelled) return
+
+          allOrders.push(...orders.map((o) => ({ ...o })))
+          setOrdersData({ data: [...allOrders] }) // 즉시 표시
+          setIsLoading(false)
+
+          if (isLastPage) break
+          page++
         }
 
-        console.log(`[OrderList] 총 ${allOrders.length}개의 주문 조회 완료`)
-        
-        // 결제 정보 조회 (모든 주문)
-        const ordersWithPayment = await Promise.all(
-          allOrders.map(async (order: OrderResponse) => {
-            let paymentMethod: PaymentMethod | undefined
-            try {
-              const paymentResponse = await apiService.getPaymentByOrder(order.orderId)
-              if (paymentResponse?.data) {
-                paymentMethod = paymentResponse.data.method
-              }
-            } catch {
-              // 결제 정보가 없으면 무시
-            }
-            return { ...order, paymentMethod }
-          })
-        )
+        if (cancelled || allOrders.length === 0) return
 
-        return { 
-          status: 200, 
-          message: 'OK', 
-          data: ordersWithPayment as (OrderResponse & { paymentMethod?: PaymentMethod })[]
-        };
+        // 2) 결제 정보 배치 조회 - 배치마다 화면 갱신
+        const PAYMENT_BATCH_SIZE = 30
+        for (let i = 0; i < allOrders.length; i += PAYMENT_BATCH_SIZE) {
+          if (cancelled) return
+          const batch = allOrders.slice(i, i + PAYMENT_BATCH_SIZE)
+          const batchResults = await Promise.all(
+            batch.map(async (order) => {
+              let paymentMethod: PaymentMethod | undefined
+              try {
+                const pr = await apiService.getPaymentByOrder(order.orderId)
+                if (pr?.data) paymentMethod = pr.data.method
+              } catch {}
+              return { ...order, paymentMethod }
+            })
+          )
+          batchResults.forEach((o, idx) => { allOrders[i + idx] = o })
+          setOrdersData({ data: [...allOrders] }) // 결제 정보 반영하여 갱신
+        }
       } catch (err: any) {
-        console.error('[OrderList] 주문 리스트 조회 실패:', err);
-        message.error('주문 목록을 불러오는데 실패했습니다.');
-        return { status: 200, message: 'OK', data: [] as (OrderResponse & { paymentMethod?: PaymentMethod })[] };
+        if (!cancelled) {
+          console.error('[OrderList] 주문 조회 실패:', err)
+          message.error('주문 목록을 불러오는데 실패했습니다.')
+          setLoadError(err instanceof Error ? err : new Error(String(err)))
+          setOrdersData({ data: [] })
+        }
+      } finally {
+        if (!cancelled) setIsLoading(false)
       }
-    },
-    retry: false,
-    staleTime: 1000 * 60 * 5, // 5분간 캐시
-  })
+    }
+
+    load()
+    return () => { cancelled = true }
+  }, [loadTrigger])
 
   // 클라이언트 사이드 필터링
   const filteredOrders = useMemo(() => {
     if (!ordersData?.data) return []
 
     return ordersData.data.filter((order) => {
+      // 삭제된 주문 제외 (soft delete)
+      if (order.deletedAt || order.active === false) {
+        return false
+      }
+
       // 검색 필터 (주문번호, 고객명, 전화번호)
-      if (searchText) {
+      if (searchText && searchText.trim()) {
         const searchLower = searchText.toLowerCase().trim()
         const orderNoMatch = order.orderNo?.toLowerCase().includes(searchLower)
         const nameMatch = order.recipientName?.toLowerCase().includes(searchLower)
@@ -382,7 +380,7 @@ const OrderList = () => {
     onSuccess: async () => {
       message.success('주문이 결제완료 처리되었습니다.')
       // 모든 관련 쿼리 무효화하고 다시 가져오기
-      await queryClient.invalidateQueries({ queryKey: ['allOrders'] })
+      refetch()
       await queryClient.invalidateQueries({ queryKey: ['order'] })
       await queryClient.invalidateQueries({ queryKey: ['paymentByOrder'] })
       // 쿼리를 무효화하면 자동으로 다시 가져오므로 refetch() 호출 불필요
@@ -403,28 +401,45 @@ const OrderList = () => {
     },
   })
 
-  // 주문 완료 처리 (PAID → COMPLETED 또는 CONFIRMED → COMPLETED)
-  const completeOrderMutation = useMutation({
-    mutationFn: async (orderId: number) => {
-      // 주문 상태 확인 후 처리
-      const orderResponse = await apiService.getOrder(orderId)
-      const currentStatus = orderResponse.data.status
-      
-      if (currentStatus === 'PAID') {
-        // PAID → COMPLETED: 먼저 CONFIRMED로 변경 후 COMPLETED로 변경
-        await apiService.confirmOrder(orderId)
-        await apiService.completeOrder(orderId)
-      } else if (currentStatus === 'CONFIRMED') {
-        // CONFIRMED → COMPLETED
-        await apiService.completeOrder(orderId)
-      } else {
-        throw new Error(`주문 상태가 올바르지 않습니다. (현재 상태: ${currentStatus})`)
+  // 단계별: 확인 처리 (CREATED/PAID → CONFIRMED). 입금대기(CREATED)면 결제+확인
+  const confirmOrderMutation = useMutation({
+    mutationFn: async ({ orderId, status }: { orderId: number; paymentMethod?: PaymentMethod; status?: OrderStatus }) => {
+      if (status === 'CREATED') {
+        const pr = await apiService.getPaymentByOrder(orderId)
+        if (!pr?.data) throw new Error('결제 정보를 찾을 수 없습니다.')
+        await apiService.markPaymentPaid(pr.data.paymentId, { pgPaymentKey: 'MANUAL_ADMIN' })
       }
+      await apiService.confirmOrder(orderId)
+    },
+    onSuccess: async () => {
+      message.success('주문이 확인 처리되었습니다. (배송준비)')
+      refetch()
+      await queryClient.invalidateQueries({ queryKey: ['order'] })
+    },
+    onError: (error: any) => {
+      message.error(error.response?.data?.message || '확인 처리에 실패했습니다.')
+    },
+  })
+
+  // 바로 완료: CREATED면 결제+확인+완료, PAID/CONFIRMED면 confirm+complete
+  const completeOrderMutation = useMutation({
+    mutationFn: async ({ orderId, status }: { orderId: number; paymentMethod?: PaymentMethod; status?: OrderStatus }) => {
+      if (status === 'CREATED') {
+        const pr = await apiService.getPaymentByOrder(orderId)
+        if (!pr?.data) throw new Error('결제 정보를 찾을 수 없습니다.')
+        await apiService.markPaymentPaid(pr.data.paymentId, { pgPaymentKey: 'MANUAL_ADMIN' })
+      }
+      try {
+        await apiService.confirmOrder(orderId)
+      } catch {
+        // 이미 CONFIRMED인 경우 무시
+      }
+      await apiService.completeOrder(orderId)
     },
     onSuccess: async () => {
       message.success('주문이 완료되었습니다.')
       // 모든 관련 쿼리 무효화하고 다시 가져오기
-      await queryClient.invalidateQueries({ queryKey: ['allOrders'] })
+      refetch()
       await queryClient.invalidateQueries({ queryKey: ['order'] })
       await queryClient.invalidateQueries({ queryKey: ['paymentByOrder'] })
     },
@@ -454,7 +469,7 @@ const OrderList = () => {
       cancelForm.resetFields()
       setCancelOrderId(null)
       // 모든 관련 쿼리 무효화하고 다시 가져오기
-      await queryClient.invalidateQueries({ queryKey: ['allOrders'] })
+      refetch()
       await queryClient.invalidateQueries({ queryKey: ['order'] })
       await queryClient.invalidateQueries({ queryKey: ['paymentByOrder'] })
     },
@@ -501,7 +516,7 @@ const OrderList = () => {
     mutationFn: (orderId: number) => apiService.deleteOrder(orderId),
     onSuccess: async () => {
       message.success('주문이 삭제되었습니다.')
-      await queryClient.invalidateQueries({ queryKey: ['allOrders'] })
+      refetch()
     },
     onError: (error: any) => {
       console.error('[OrderList] 주문 삭제 에러:', error)
@@ -540,7 +555,7 @@ const OrderList = () => {
       }
       
       setSelectedRowKeys([])
-      await queryClient.invalidateQueries({ queryKey: ['allOrders'] })
+      refetch()
     },
     onError: (error: any) => {
       message.error('일괄 결제완료 처리에 실패했습니다.')
@@ -548,24 +563,59 @@ const OrderList = () => {
     },
   })
 
-  // 일괄 완료 처리
-  const bulkCompleteMutation = useMutation({
-    mutationFn: async (orderIds: number[]) => {
+  // 일괄 확인 처리 (입금대기/결제완료 → CONFIRMED). 입금대기면 결제+확인
+  const bulkConfirmMutation = useMutation({
+    mutationFn: async (orders: (OrderResponse & { paymentMethod?: PaymentMethod })[]) => {
       const results = []
-      for (const orderId of orderIds) {
+      for (const order of orders) {
         try {
-          const orderResponse = await apiService.getOrder(orderId)
-          const currentStatus = orderResponse.data.status
-          
-          if (currentStatus === 'PAID') {
-            await apiService.confirmOrder(orderId)
-            await apiService.completeOrder(orderId)
-          } else if (currentStatus === 'CONFIRMED') {
-            await apiService.completeOrder(orderId)
+          if (order.status === 'CREATED') {
+            const pr = await apiService.getPaymentByOrder(order.orderId)
+            if (!pr?.data) throw new Error('결제 정보 없음')
+            await apiService.markPaymentPaid(pr.data.paymentId, { pgPaymentKey: 'MANUAL_ADMIN' })
           }
-          results.push({ orderId, success: true })
+          await apiService.confirmOrder(order.orderId)
+          results.push({ orderId: order.orderId, success: true })
         } catch (error) {
-          results.push({ orderId, success: false, error })
+          results.push({ orderId: order.orderId, success: false, error })
+        }
+      }
+      return results
+    },
+    onSuccess: async (results) => {
+      const successCount = results.filter((r) => r.success).length
+      const failCount = results.filter((r) => !r.success).length
+      if (failCount === 0) {
+        message.success(`${successCount}건의 주문이 확인 처리되었습니다.`)
+      } else {
+        message.warning(`${successCount}건 성공, ${failCount}건 실패`)
+      }
+      setSelectedRowKeys([])
+      refetch()
+    },
+    onError: () => message.error('일괄 확인 처리에 실패했습니다.'),
+  })
+
+  // 일괄 완료 처리 - 입금대기면 결제+확인+완료, 그 외는 confirm+complete
+  const bulkCompleteMutation = useMutation({
+    mutationFn: async (orders: (OrderResponse & { paymentMethod?: PaymentMethod })[]) => {
+      const results = []
+      for (const order of orders) {
+        try {
+          if (order.status === 'CREATED') {
+            const pr = await apiService.getPaymentByOrder(order.orderId)
+            if (!pr?.data) throw new Error('결제 정보 없음')
+            await apiService.markPaymentPaid(pr.data.paymentId, { pgPaymentKey: 'MANUAL_ADMIN' })
+          }
+          try {
+            await apiService.confirmOrder(order.orderId)
+          } catch {
+            // 이미 CONFIRMED인 경우 무시
+          }
+          await apiService.completeOrder(order.orderId)
+          results.push({ orderId: order.orderId, success: true })
+        } catch (error) {
+          results.push({ orderId: order.orderId, success: false, error })
         }
       }
       return results
@@ -581,7 +631,7 @@ const OrderList = () => {
       }
       
       setSelectedRowKeys([])
-      await queryClient.invalidateQueries({ queryKey: ['allOrders'] })
+      refetch()
     },
     onError: (error: any) => {
       message.error('일괄 완료 처리에 실패했습니다.')
@@ -615,7 +665,7 @@ const OrderList = () => {
       
       setSelectedRowKeys([])
       setIsBulkStatusModalOpen(false)
-      await queryClient.invalidateQueries({ queryKey: ['allOrders'] })
+      refetch()
     },
     onError: (error: any) => {
       message.error('일괄 취소 처리에 실패했습니다.')
@@ -625,15 +675,15 @@ const OrderList = () => {
 
   // 배송 시작 처리 (운송장 번호 입력)
   const startDeliveryMutation = useMutation({
-    mutationFn: ({ orderId, trackingNo }: { orderId: number; trackingNo: string }) =>
-      apiService.startDelivery(orderId, { trackingNo }),
+    mutationFn: ({ orderId, carrier, trackingNo }: { orderId: number; carrier: string; trackingNo: string }) =>
+      apiService.startDelivery(orderId, { carrier, trackingNo }),
     onSuccess: async () => {
       message.success('운송장 번호가 등록되었습니다.')
       setIsTrackingModalOpen(false)
       setSelectedOrder(null)
       trackingForm.resetFields()
       // 모든 관련 쿼리 무효화하고 다시 가져오기
-      await queryClient.invalidateQueries({ queryKey: ['allOrders'] })
+      refetch()
       await queryClient.invalidateQueries({ queryKey: ['order'] })
       await queryClient.invalidateQueries({ queryKey: ['paymentByOrder'] })
     },
@@ -650,6 +700,7 @@ const OrderList = () => {
   const handleOpenTrackingModal = (order: OrderResponse) => {
     setSelectedOrder(order)
     trackingForm.setFieldsValue({
+      carrier: order.carrier || 'CJ대한통운',
       trackingNo: order.trackingNo || '',
     })
     setIsTrackingModalOpen(true)
@@ -660,6 +711,7 @@ const OrderList = () => {
       if (selectedOrder) {
         startDeliveryMutation.mutate({
           orderId: selectedOrder.orderId,
+          carrier: values.carrier || 'CJ대한통운',
           trackingNo: values.trackingNo.trim(),
         })
       }
@@ -674,11 +726,33 @@ const OrderList = () => {
     })
   }
 
-  const handleCompleteOrder = (orderId: number) => {
+  const handleConfirmOrder = (record: OrderResponse & { paymentMethod?: PaymentMethod }) => {
+    const isCreated = record.status === 'CREATED'
+    Modal.confirm({
+      title: '확인 처리',
+      content: isCreated
+        ? '이 주문을 결제+확인 처리하시겠습니까? (입금대기 → 배송준비)'
+        : '이 주문을 확인 처리하시겠습니까? (PAID → CONFIRMED, 배송준비)',
+      onOk: () => confirmOrderMutation.mutate({
+        orderId: record.orderId,
+        paymentMethod: record.paymentMethod || 'BANK_TRANSFER',
+        status: record.status,
+      }),
+    })
+  }
+
+  const handleCompleteOrder = (record: OrderResponse & { paymentMethod?: PaymentMethod }) => {
+    const isCreated = record.status === 'CREATED'
     Modal.confirm({
       title: '주문 완료',
-      content: '이 주문을 완료 처리하시겠습니까? (PAID/CONFIRMED → COMPLETED)',
-      onOk: () => completeOrderMutation.mutate(orderId),
+      content: isCreated
+        ? '이 주문을 결제+확인+완료 처리하시겠습니까? (입금대기 → 완료)'
+        : '이 주문을 완료 처리하시겠습니까? (PAID/CONFIRMED → COMPLETED)',
+      onOk: () => completeOrderMutation.mutate({
+        orderId: record.orderId,
+        paymentMethod: record.paymentMethod || 'BANK_TRANSFER',
+        status: record.status,
+      }),
     })
   }
 
@@ -690,7 +764,7 @@ const OrderList = () => {
   const handleDeleteOrder = (orderId: number) => {
     Modal.confirm({
       title: '주문 삭제',
-      content: '이 주문을 정말 삭제하시겠습니까? 삭제된 주문은 복구할 수 없습니다.',
+      content: '이 주문을 삭제하시겠습니까? 삭제된 주문은 목록에서 숨겨지지만 복구할 수 있습니다.',
       okText: '삭제',
       okType: 'danger',
       cancelText: '취소',
@@ -712,7 +786,7 @@ const OrderList = () => {
   }
 
   // 일괄 상태 변경 핸들러
-  const handleBulkStatusChange = (action: 'paid' | 'complete' | 'cancel') => {
+  const handleBulkStatusChange = (action: 'paid' | 'confirm' | 'complete' | 'cancel') => {
     if (selectedRowKeys.length === 0) {
       message.warning('상태를 변경할 주문을 선택해주세요.')
       return
@@ -728,14 +802,26 @@ const OrderList = () => {
           bulkMarkPaidMutation.mutate(selectedRowKeys as number[])
         },
       })
+    } else if (action === 'confirm') {
+      const selectedOrders = filteredOrders.filter((o) => selectedRowKeys.includes(o.orderId))
+      Modal.confirm({
+        title: '일괄 확인 처리',
+        content: `선택한 ${selectedRowKeys.length}건의 주문을 확인 처리하시겠습니까? (입금대기/결제완료 → 배송준비)`,
+        okText: '확인',
+        cancelText: '취소',
+        onOk: () => {
+          bulkConfirmMutation.mutate(selectedOrders)
+        },
+      })
     } else if (action === 'complete') {
+      const selectedOrders = filteredOrders.filter((o) => selectedRowKeys.includes(o.orderId))
       Modal.confirm({
         title: '일괄 완료 처리',
         content: `선택한 ${selectedRowKeys.length}건의 주문을 완료 처리하시겠습니까?`,
         okText: '확인',
         cancelText: '취소',
         onOk: () => {
-          bulkCompleteMutation.mutate(selectedRowKeys as number[])
+          bulkCompleteMutation.mutate(selectedOrders)
         },
       })
     } else if (action === 'cancel') {
@@ -871,7 +957,7 @@ const OrderList = () => {
         const { address: cleanAddress, entranceCode } = extractEntranceCode(fullAddress)
         
         // 각 상품별로 개별 행 생성
-        items.forEach((item) => {
+        items.forEach((item, itemIndex) => {
           let purchasePriceUnit = 0
           const productId = item.productId
           const productName = item.productName
@@ -887,11 +973,15 @@ const OrderList = () => {
           }
           
           const quantity = item.quantity || 0
-          const salesUnitPrice = item.unitPrice || 0  // 매출단가 (판매 단가)
-          const itemPurchasePrice = purchasePriceUnit * quantity  // 매입가 = 매입단가 * 수량
-          const itemSalesPrice = salesUnitPrice * quantity  // 매출가 = 매출단가 * 수량
-          
-          console.log(`[Excel Debug] 상품명=${productName}, productId=${productId}, 수량=${quantity}, 매출단가=${salesUnitPrice}, 매출가=${itemSalesPrice}, 매입가=${itemPurchasePrice}`)
+          const unitPrice = item.unitPrice || 0
+          const lineTotal = item.lineTotal ?? unitPrice * quantity
+          // 매출가 = 주문 할인을 비율로 분배한 실제 청구액 (subtotalAmount 기준)
+          const orderSubtotal = order.subtotalAmount || 0
+          const orderDiscount = order.discountAmount || 0
+          const discountRatio = orderSubtotal > 0 && orderDiscount > 0 ? 1 - orderDiscount / orderSubtotal : 1
+          const itemSalesPrice = Math.round(lineTotal * discountRatio)  // 할인 적용된 매출가
+          const itemPurchasePrice = purchasePriceUnit * quantity
+          const orderFinalAmount = itemIndex === 0 ? (order.finalAmount || 0) : ''
           
           excelData.push({
             '년월일': order.orderedAt ? dayjs(order.orderedAt).format('YYYY-MM-DD') : '-',
@@ -901,9 +991,10 @@ const OrderList = () => {
             '전화번호': formatPhoneNumber(order.recipientPhone),
             '상품명': productName || '-',
             '수량': quantity,
-            '단가': salesUnitPrice,  // 매출단가
+            '단가': unitPrice,  // 할인전 금액
             '매출가': itemSalesPrice,
-            '배송비': order.deliveryFee || 0,
+            '배송비': itemIndex === 0 ? (order.deliveryFee || 0) : '',  // 첫 번째 상품에만 배송비 표시
+            '최종금액': orderFinalAmount,  // 주문 최종 결제액
             '배송지주소': cleanAddress || '-',
             '공동현관/입구비번': entranceCode || '-',
             '매입가': itemPurchasePrice > 0 ? itemPurchasePrice : '-',
@@ -929,6 +1020,7 @@ const OrderList = () => {
       { wch: 12 },  // 단가
       { wch: 12 },  // 매출가
       { wch: 10 },  // 배송비
+      { wch: 12 },  // 최종금액
       { wch: 50 },  // 배송지주소
       { wch: 20 },  // 공동현관/입구비번
       { wch: 12 },  // 매입가
@@ -956,7 +1048,15 @@ const OrderList = () => {
       return
     }
 
-    await generateExcel(filteredOrders, '전체주문목록')
+    Modal.confirm({
+      title: '전체 주문 다운로드',
+      content: `현재 필터된 ${filteredOrders.length}건의 주문을 모두 다운로드하시겠습니까?`,
+      okText: '다운로드',
+      cancelText: '취소',
+      onOk: async () => {
+        await generateExcel(filteredOrders, '전체주문목록')
+      },
+    })
   }
 
   // 선택된 주문 엑셀 다운로드
@@ -1079,6 +1179,7 @@ const OrderList = () => {
       dataIndex: 'status',
       key: 'status',
       width: columnWidths.status,
+      fixed: 'left' as const,
       onHeaderCell: () => ({
         width: columnWidths.status,
         onResize: handleResize('status'),
@@ -1091,6 +1192,7 @@ const OrderList = () => {
       title: '처리',
       key: 'actions',
       width: columnWidths.actions,
+      fixed: 'left' as const,
       onHeaderCell: () => ({
         width: columnWidths.actions,
         onResize: handleResize('actions'),
@@ -1109,13 +1211,20 @@ const OrderList = () => {
         return (
           <Space direction="vertical" size={4}>
             {status === 'CREATED' && (
-              <Button type="primary" size="small" onClick={(e) => { e.stopPropagation(); handleMarkOrderPaid(record.orderId, record.paymentMethod || 'BANK_TRANSFER'); }} loading={markOrderPaidMutation.isPending} style={btnStyle}>결제</Button>
+              <>
+                <Button type="primary" size="small" onClick={(e) => { e.stopPropagation(); handleMarkOrderPaid(record.orderId, record.paymentMethod || 'BANK_TRANSFER'); }} loading={markOrderPaidMutation.isPending} style={btnStyle}>결제</Button>
+                <Button type="primary" size="small" onClick={(e) => { e.stopPropagation(); handleConfirmOrder(record); }} loading={confirmOrderMutation.isPending} style={btnStyle}>확인</Button>
+                <Button type="primary" size="small" onClick={(e) => { e.stopPropagation(); handleCompleteOrder(record); }} loading={completeOrderMutation.isPending} style={{ ...btnStyle, backgroundColor: '#52c41a', borderColor: '#52c41a' }}>완료</Button>
+              </>
             )}
             {status === 'PAID' && (
-              <Button type="primary" size="small" onClick={(e) => { e.stopPropagation(); handleCompleteOrder(record.orderId); }} loading={completeOrderMutation.isPending} style={{ ...btnStyle, backgroundColor: '#52c41a', borderColor: '#52c41a' }}>완료</Button>
+              <>
+                <Button type="primary" size="small" onClick={(e) => { e.stopPropagation(); handleConfirmOrder(record); }} loading={confirmOrderMutation.isPending} style={btnStyle}>확인</Button>
+                <Button type="primary" size="small" onClick={(e) => { e.stopPropagation(); handleCompleteOrder(record); }} loading={completeOrderMutation.isPending} style={{ ...btnStyle, backgroundColor: '#52c41a', borderColor: '#52c41a' }}>완료</Button>
+              </>
             )}
             {status === 'CONFIRMED' && (
-              <Button type="primary" size="small" onClick={(e) => { e.stopPropagation(); handleCompleteOrder(record.orderId); }} loading={completeOrderMutation.isPending} style={{ ...btnStyle, backgroundColor: '#52c41a', borderColor: '#52c41a' }}>완료</Button>
+              <Button type="primary" size="small" onClick={(e) => { e.stopPropagation(); handleCompleteOrder(record); }} loading={completeOrderMutation.isPending} style={{ ...btnStyle, backgroundColor: '#52c41a', borderColor: '#52c41a' }}>완료</Button>
             )}
             <Button size="small" danger onClick={(e) => { e.stopPropagation(); handleCancelOrder(record.orderId); }} loading={cancelOrderMutation.isPending} style={btnStyle}>취소</Button>
           </Space>
@@ -1126,6 +1235,7 @@ const OrderList = () => {
       title: '결제 방식',
       key: 'payment',
       width: columnWidths.payment,
+      fixed: 'left' as const,
       onHeaderCell: () => ({
         width: columnWidths.payment,
         onResize: handleResize('payment'),
@@ -1150,6 +1260,7 @@ const OrderList = () => {
       dataIndex: 'cashReceipt',
       key: 'cashReceipt',
       width: columnWidths.cashReceipt,
+      fixed: 'left' as const,
       onHeaderCell: () => ({
         width: columnWidths.cashReceipt,
         onResize: handleResize('cashReceipt'),
@@ -1174,6 +1285,7 @@ const OrderList = () => {
       title: '상품',
       key: 'items',
       width: columnWidths.items,
+      fixed: 'left' as const,
       onHeaderCell: () => ({
         width: columnWidths.items,
         onResize: handleResize('items'),
@@ -1203,6 +1315,7 @@ const OrderList = () => {
       dataIndex: 'fulfillmentType',
       key: 'fulfillmentType',
       width: columnWidths.fulfillmentType,
+      fixed: 'left' as const,
       onHeaderCell: () => ({
         width: columnWidths.fulfillmentType,
         onResize: handleResize('fulfillmentType'),
@@ -1284,7 +1397,91 @@ const OrderList = () => {
     <div>
       {/* 주문 통계 테이블 */}
       <Card 
-        title={<span style={{ fontWeight: 600 }}>전체주문관리</span>}
+        title={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+            <span style={{ fontWeight: 600 }}>전체주문관리</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <Tabs
+                activeKey={dateFilterTab}
+                onChange={(key) => {
+                  setDateFilterTab(key as 'all' | 'daily' | 'weekly' | 'monthly' | 'quarterly')
+                  setCurrentPage(1)
+                }}
+                items={[
+                  { key: 'all', label: '전체' },
+                  { key: 'daily', label: '일별' },
+                  { key: 'weekly', label: '주별' },
+                  { key: 'monthly', label: '월별' },
+                  { key: 'quarterly', label: '3개월' },
+                ]}
+                style={{ marginBottom: 0 }}
+                size="small"
+              />
+              {dateFilterTab === 'daily' && (
+                <DatePicker
+                  value={selectedDate}
+                  onChange={(date) => {
+                    if (date) {
+                      setSelectedDate(date)
+                      setCurrentPage(1)
+                    }
+                  }}
+                  format="YYYY-MM-DD"
+                  placeholder="날짜 선택"
+                  size="small"
+                  style={{ width: 130 }}
+                />
+              )}
+              {dateFilterTab === 'weekly' && (
+                <DatePicker
+                  picker="week"
+                  value={dayjs(selectedWeek)}
+                  onChange={(date) => {
+                    if (date) {
+                      setSelectedWeek(date.startOf('week').format('YYYY-MM-DD'))
+                      setCurrentPage(1)
+                    }
+                  }}
+                  format="YYYY [W]주"
+                  placeholder="주 선택"
+                  size="small"
+                  style={{ width: 130 }}
+                />
+              )}
+              {dateFilterTab === 'monthly' && (
+                <DatePicker
+                  picker="month"
+                  value={dayjs(selectedMonth)}
+                  onChange={(date) => {
+                    if (date) {
+                      setSelectedMonth(date.format('YYYY-MM'))
+                      setCurrentPage(1)
+                    }
+                  }}
+                  format="YYYY년 MM월"
+                  placeholder="월 선택"
+                  size="small"
+                  style={{ width: 130 }}
+                />
+              )}
+            </div>
+            <Input.Search
+              placeholder="주문번호, 고객명, 전화번호"
+              allowClear
+              value={searchText}
+              onChange={(e) => {
+                setSearchText(e.target.value)
+                setCurrentPage(1)
+              }}
+              onSearch={(value) => {
+                setSearchText(value)
+                setCurrentPage(1)
+              }}
+              style={{ width: 280 }}
+              size="small"
+            />
+          </div>
+        }
         style={{ marginBottom: 24 }}
         styles={{
           header: {
@@ -1295,19 +1492,19 @@ const OrderList = () => {
           <Space wrap>
             <Button 
               icon={<DownloadOutlined />} 
-              onClick={handleExportAllToExcel}
-              disabled={filteredOrders.length === 0}
-              type="default"
-            >
-              전체 엑셀 ({filteredOrders.length}건)
-            </Button>
-            <Button 
-              icon={<DownloadOutlined />} 
               onClick={handleExportToExcel}
               disabled={selectedRowKeys.length === 0}
               type="primary"
             >
-              선택 엑셀 {selectedRowKeys.length > 0 && `(${selectedRowKeys.length}건)`}
+              선택 엑셀 다운로드 {selectedRowKeys.length > 0 && `(${selectedRowKeys.length}건)`}
+            </Button>
+            <Button 
+              icon={<DownloadOutlined />} 
+              onClick={handleExportAllToExcel}
+              disabled={filteredOrders.length === 0}
+              type="default"
+            >
+              전체 엑셀 다운로드 ({filteredOrders.length}건)
             </Button>
             {selectedRowKeys.length > 0 && (
               <>
@@ -1318,6 +1515,14 @@ const OrderList = () => {
                   style={{ backgroundColor: '#1890ff', color: 'white', borderColor: '#1890ff' }}
                 >
                   결제완료 ({selectedRowKeys.length}건)
+                </Button>
+                <Button 
+                  onClick={() => handleBulkStatusChange('confirm')}
+                  disabled={selectedRowKeys.length === 0}
+                  loading={bulkConfirmMutation.isPending}
+                  style={{ backgroundColor: '#13c2c2', color: 'white', borderColor: '#13c2c2' }}
+                >
+                  확인 ({selectedRowKeys.length}건)
                 </Button>
                 <Button 
                   onClick={() => handleBulkStatusChange('complete')}
@@ -1341,12 +1546,9 @@ const OrderList = () => {
               icon={<ReloadOutlined spin={isRefreshing} />} 
               onClick={async () => {
                 setIsRefreshing(true)
-                await Promise.all([
-                  queryClient.invalidateQueries({ queryKey: ['allOrders'] }),
-                  queryClient.invalidateQueries({ queryKey: ['order'] }),
-                  queryClient.invalidateQueries({ queryKey: ['paymentByOrder'] }),
-                ])
-                await refetch()
+                queryClient.invalidateQueries({ queryKey: ['order'] })
+                queryClient.invalidateQueries({ queryKey: ['paymentByOrder'] })
+                refetch()
                 setTimeout(() => {
                   setIsRefreshing(false)
                   message.success({ content: '✅ 새로고침 완료!', duration: 1.5 })
@@ -1456,153 +1658,9 @@ const OrderList = () => {
         </table>
       </Card>
       
-      {/* 탭 섹션 */}
+      {/* 필터 섹션 */}
       <Card style={{ marginBottom: 24 }}>
-        <Tabs
-          activeKey={activeTab}
-          onChange={(key) => {
-            setActiveTab(key)
-            setCurrentPage(1) // 탭 변경 시 첫 페이지로
-          }}
-          items={[
-            {
-              key: 'ALL',
-              label: `전체 (${orderStats.total})`,
-              children: null,
-            },
-            {
-              key: 'CREATED',
-              label: `입금대기 (${orderStats.waitingPayment})`,
-              children: null,
-            },
-            {
-              key: 'PICKUP_WAITING',
-              label: `픽업대기 (${orderStats.pickupWaiting})`,
-              children: null,
-            },
-            {
-              key: 'DELIVERY_READY',
-              label: `배송준비 (${orderStats.deliveryReady})`,
-              children: null,
-            },
-            {
-              key: 'DELIVERY',
-              label: `배송중 (${orderStats.delivering})`,
-              children: null,
-            },
-            {
-              key: 'COMPLETED',
-              label: `완료 (${orderStats.completed})`,
-              children: null,
-            },
-            {
-              key: 'CANCELED',
-              label: `취소 (${orderStats.canceled})`,
-              children: null,
-            },
-          ]}
-        />
-        
-        {/* 검색창 */}
-        <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-          <Col xs={24}>
-            <Space direction="vertical" size={4} style={{ width: '100%' }}>
-              <Typography.Text type="secondary">주문 검색</Typography.Text>
-              <Input.Search
-                placeholder="주문번호, 고객명, 전화번호로 검색"
-                allowClear
-                value={searchText}
-                onChange={(e) => {
-                  setSearchText(e.target.value)
-                  setCurrentPage(1)
-                }}
-                onSearch={(value) => {
-                  setSearchText(value)
-                  setCurrentPage(1)
-                }}
-                style={{ width: '100%' }}
-                size="large"
-              />
-            </Space>
-          </Col>
-        </Row>
-
-        {/* 날짜 필터 */}
-        <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-          <Col xs={24}>
-            <Space direction="vertical" size={4} style={{ width: '100%' }}>
-              <Typography.Text type="secondary">기간 선택</Typography.Text>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
-                <Tabs
-                  activeKey={dateFilterTab}
-                  onChange={(key) => {
-                    setDateFilterTab(key as 'all' | 'daily' | 'weekly' | 'monthly' | 'quarterly')
-                    setCurrentPage(1)
-                  }}
-                  items={[
-                    { key: 'all', label: '전체' },
-                    { key: 'daily', label: '일별' },
-                    { key: 'weekly', label: '주별' },
-                    { key: 'monthly', label: '월별' },
-                    { key: 'quarterly', label: '3개월' },
-                  ]}
-                  style={{ marginBottom: 0 }}
-                  size="small"
-                />
-                {dateFilterTab === 'daily' && (
-                  <DatePicker
-                    value={selectedDate}
-                    onChange={(date) => {
-                      if (date) {
-                        setSelectedDate(date)
-                        setCurrentPage(1)
-                      }
-                    }}
-                    format="YYYY-MM-DD"
-                    placeholder="날짜 선택"
-                    size="small"
-                    style={{ width: 150 }}
-                  />
-                )}
-                {dateFilterTab === 'weekly' && (
-                  <DatePicker
-                    picker="week"
-                    value={dayjs(selectedWeek)}
-                    onChange={(date) => {
-                      if (date) {
-                        setSelectedWeek(date.startOf('week').format('YYYY-MM-DD'))
-                        setCurrentPage(1)
-                      }
-                    }}
-                    format="YYYY [W]주"
-                    placeholder="주 선택"
-                    size="small"
-                    style={{ width: 150 }}
-                  />
-                )}
-                {dateFilterTab === 'monthly' && (
-                  <DatePicker
-                    picker="month"
-                    value={dayjs(selectedMonth)}
-                    onChange={(date) => {
-                      if (date) {
-                        setSelectedMonth(date.format('YYYY-MM'))
-                        setCurrentPage(1)
-                      }
-                    }}
-                    format="YYYY년 MM월"
-                    placeholder="월 선택"
-                    size="small"
-                    style={{ width: 150 }}
-                  />
-                )}
-              </div>
-            </Space>
-          </Col>
-        </Row>
-
-        {/* 추가 필터 */}
-        <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+        <Row gutter={[16, 16]}>
           <Col xs={24} sm={12} md={8}>
             <Space direction="vertical" size={4} style={{ width: '100%' }}>
               <Typography.Text type="secondary">배송 방식</Typography.Text>
@@ -1692,14 +1750,14 @@ const OrderList = () => {
         </Space>
       )}
 
-      {error && (
+      {loadError && (
         <Card style={{ marginBottom: 24 }}>
           <Space direction="vertical" style={{ width: '100%' }}>
             <Typography.Text type="warning">
               ⚠️ 주문 리스트를 불러오는 중 오류가 발생했습니다.
             </Typography.Text>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              {error instanceof Error ? error.message : '알 수 없는 오류'}
+              {loadError instanceof Error ? loadError.message : '알 수 없는 오류'}
             </Typography.Text>
           </Space>
         </Card>
@@ -1785,6 +1843,21 @@ const OrderList = () => {
         confirmLoading={startDeliveryMutation.isPending}
       >
         <Form form={trackingForm} layout="vertical">
+          <Form.Item
+            label="택배사"
+            name="carrier"
+            initialValue="CJ대한통운"
+            rules={[{ required: true, message: '택배사를 선택해주세요.' }]}
+          >
+            <Select placeholder="택배사 선택" options={[
+              { value: 'CJ대한통운', label: 'CJ대한통운' },
+              { value: '우체국택배', label: '우체국택배' },
+              { value: '한진택배', label: '한진택배' },
+              { value: '롯데택배', label: '롯데택배' },
+              { value: '대신택배', label: '대신택배' },
+              { value: '일양로지스', label: '일양로지스' },
+            ]} />
+          </Form.Item>
           <Form.Item
             label="운송장 번호"
             name="trackingNo"

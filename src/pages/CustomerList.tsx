@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Card, Table, Space, Typography, Button, Modal, Form, Input, message, Tag, Switch } from 'antd'
 import { EyeOutlined, PlusOutlined, ReloadOutlined, SearchOutlined, DownloadOutlined, StopOutlined } from '@ant-design/icons'
@@ -100,58 +100,110 @@ const CustomerList = () => {
     retry: false,
   })
 
-  // 전체 주문 데이터 조회 (고객별 총 금액 계산용)
-  const { data: ordersData, isLoading: isLoadingOrders } = useQuery({
-    queryKey: ['allOrdersForCustomerStats'],
-    queryFn: async () => {
-      console.log('[CustomerList] 전체 주문 조회 시작 (고객별 총 금액 계산용)');
-      const allOrders: OrderResponse[] = [];
-      let page = 0;
-      let hasMore = true;
+  // 표시할 고객 목록 (이전에 정의된 displayedCustomers보다 먼저 계산)
+  const displayedCustomersRaw = customersData?.data || []
 
-      while (hasMore) {
+  // 고객별 통계 - 불러와지는 대로 표시 (progressive)
+  const [customerStatsData, setCustomerStatsData] = useState<Record<number, { totalAmount: number; orderCount: number; address: string }>>({})
+  const statsLoadTrigger = displayedCustomersRaw.map((c) => c.customerId).join(',')
+
+  useEffect(() => {
+    const customerIds = displayedCustomersRaw.map((c) => c.customerId).filter((id): id is number => id != null)
+    if (customerIds.length === 0) {
+      setCustomerStatsData({})
+      return
+    }
+
+    let cancelled = false
+    setCustomerStatsData({})
+
+    const load = async () => {
+      // 1) getAllOrdersAdmin 페이지별 조회 - 불러올 때마다 바로 통계 반영
+      let bulkOrders: OrderResponse[] = []
+      try {
+        let page = 0
+        const size = 100
+        while (true) {
+          const res = await apiService.getAllOrdersAdmin({ page, size })
+          const orders = Array.isArray(res?.data) ? res.data : res?.data?.content ?? []
+          if (orders.length === 0) break
+          if (cancelled) return
+          bulkOrders.push(...orders)
+          // 페이지마다 즉시 통계 계산하여 표시
+          const valid = bulkOrders.filter((o) => o.status !== 'CANCELED')
+          const stats: Record<number, { totalAmount: number; orderCount: number; address: string }> = {}
+          customerIds.forEach((cid) => {
+            const ords = valid.filter((o) => Number(o.customerId) === Number(cid))
+            const totalAmount = ords.reduce((s, o) => s + (o.finalAmount ?? o.subtotalAmount ?? 0), 0)
+            const latest = ords
+              .filter((o) => o.fulfillmentType === 'DELIVERY' && (o.address1 || o.address2))
+              .sort((a, b) => (b.orderedAt || '').localeCompare(a.orderedAt || ''))[0]
+            const address = latest ? [latest.address1, latest.address2].filter(Boolean).join(' ') : ''
+            stats[cid] = { totalAmount, orderCount: ords.length, address }
+          })
+          setCustomerStatsData({ ...stats })
+          if (orders.length < size || (res?.data && !Array.isArray(res.data) && (res.data as any).last)) break
+          page++
+        }
+      } catch {
+        bulkOrders = []
+      }
+
+      if (cancelled) return
+      if (bulkOrders.length > 0) return
+
+      // 2) 폴백: 고객별 조회 - 한 명씩 결과 나올 때마다 표시
+      for (const customerId of customerIds) {
+        if (cancelled) return
         try {
-          const response = await apiService.getAllOrdersAdmin({ page, size: 100 });
-          if (response.data && response.data.content && response.data.content.length > 0) {
-            allOrders.push(...response.data.content);
-            if (response.data.last || response.data.content.length < 100) {
-              hasMore = false;
-            } else {
-              page++;
-            }
-          } else {
-            hasMore = false;
-          }
-        } catch (err: any) {
-          console.error(`[CustomerList] 주문 조회 실패 (페이지 ${page}):`, err.message);
-          hasMore = false;
+          const res = await apiService.getOrdersByCustomer(customerId)
+          const orders = Array.isArray(res?.data) ? res.data : (res as any)?.data ? [res.data].flat() : []
+          const validOrders = orders.filter((o: any) => o?.status !== 'CANCELED')
+          const totalAmount = validOrders.reduce((s: number, o: any) => s + (o.finalAmount ?? o.subtotalAmount ?? 0), 0)
+          const latest = validOrders
+            .filter((o: any) => o.fulfillmentType === 'DELIVERY' && (o.address1 || o.address2))
+            .sort((a: any, b: any) => (b.orderedAt || '').localeCompare(a.orderedAt || ''))[0]
+          const address = latest ? [latest.address1, latest.address2].filter(Boolean).join(' ') : ''
+          setCustomerStatsData((prev) => ({ ...prev, [customerId]: { totalAmount, orderCount: validOrders.length, address } }))
+        } catch (err) {
+          setCustomerStatsData((prev) => ({ ...prev, [customerId]: { totalAmount: 0, orderCount: 0, address: '' } }))
         }
       }
+    }
+    load()
+    return () => { cancelled = true }
+  }, [statsLoadTrigger])
 
-      console.log(`[CustomerList] 전체 주문 ${allOrders.length}개 조회 완료`);
-      return allOrders;
-    },
-    staleTime: 1000 * 60 * 5, // 5분간 캐시
-  })
-
-  // 고객별 총 사용 금액 계산 (취소된 주문 제외)
   const customerTotalAmounts = useMemo(() => {
-    if (!ordersData) return {};
-    
-    const totals: Record<number, number> = {};
-    ordersData.forEach((order) => {
-      // 취소된 주문은 제외
-      if (order.status === 'CANCELED') return;
-      
-      const customerId = order.customerId;
-      if (!totals[customerId]) {
-        totals[customerId] = 0;
-      }
-      totals[customerId] += order.finalAmount || 0;
-    });
-    
-    return totals;
-  }, [ordersData])
+    const map: Record<number, number> = {}
+    if (customerStatsData) {
+      Object.entries(customerStatsData).forEach(([cid, stats]) => {
+        map[Number(cid)] = (stats as any).totalAmount ?? 0
+      })
+    }
+    return map
+  }, [customerStatsData])
+
+  const customerOrderCounts = useMemo(() => {
+    const map: Record<number, number> = {}
+    if (customerStatsData) {
+      Object.entries(customerStatsData).forEach(([cid, stats]) => {
+        map[Number(cid)] = (stats as any).orderCount ?? 0
+      })
+    }
+    return map
+  }, [customerStatsData])
+
+  const customerAddresses = useMemo(() => {
+    const map: Record<number, string> = {}
+    if (customerStatsData) {
+      Object.entries(customerStatsData).forEach(([cid, stats]) => {
+        const addr = (stats as any).address
+        if (addr) map[Number(cid)] = addr
+      })
+    }
+    return map
+  }, [customerStatsData])
 
   // 전화번호 포맷팅 (010-1234-5678 형식)
   const formatPhoneNumber = (phone?: string) => {
@@ -233,7 +285,7 @@ const CustomerList = () => {
 
 
   // 표시할 고객 목록 (이미 서버에서 페이지네이션된 데이터)
-  const displayedCustomers = customersData?.data || []
+  const displayedCustomers = displayedCustomersRaw
   const totalPages = customersData?.totalPages || 0
   const totalCustomers = customersData?.total || 0
 
@@ -280,15 +332,52 @@ const CustomerList = () => {
         return
       }
 
+      // 엑셀용 고객별 주문 통계 조회 (getOrdersByCustomer)
+      message.loading({ content: '고객별 사용 금액 조회 중...', key: 'excel', duration: 0 })
+      const exportStats: Record<number, { totalAmount: number; orderCount: number; address: string }> = {}
+      const BATCH_SIZE = 20
+      for (let i = 0; i < customersToExport.length; i += BATCH_SIZE) {
+        const batch = customersToExport.slice(i, i + BATCH_SIZE)
+        const results = await Promise.all(
+          batch.map(async (customer) => {
+            try {
+              const res = await apiService.getOrdersByCustomer(customer.customerId)
+              const orders = Array.isArray(res?.data) ? res.data : []
+              const validOrders = orders.filter((o: any) => o?.status !== 'CANCELED')
+              const totalAmount = validOrders.reduce((sum: number, o: any) => sum + (o.finalAmount ?? o.subtotalAmount ?? 0), 0)
+              const latestDeliveryOrder = validOrders
+                .filter((o: any) => o.fulfillmentType === 'DELIVERY' && (o.address1 || o.address2))
+                .sort((a: any, b: any) => (b.orderedAt || '').localeCompare(a.orderedAt || ''))[0]
+              const address = latestDeliveryOrder
+                ? [latestDeliveryOrder.address1, latestDeliveryOrder.address2].filter(Boolean).join(' ')
+                : ''
+              return { customerId: customer.customerId, totalAmount, orderCount: validOrders.length, address }
+            } catch {
+              return { customerId: customer.customerId, totalAmount: 0, orderCount: 0, address: '' }
+            }
+          })
+        )
+        results.forEach((r) => { exportStats[r.customerId] = { totalAmount: r.totalAmount, orderCount: r.orderCount, address: r.address } })
+      }
+      message.destroy('excel')
+
       // 엑셀 데이터 준비
       const excelData = customersToExport.map((customer) => {
         const isBlocked = customer.blockInfo?.blocked === true
-        const totalAmount = customerTotalAmounts[customer.customerId] || 0
+        const stats = exportStats[customer.customerId] ?? { totalAmount: 0, orderCount: 0, address: '' }
+        const totalAmount = stats.totalAmount
+        const orderCount = stats.orderCount
+        const primaryAddr = customer.addresses?.[0]
+        const address = primaryAddr
+          ? [primaryAddr.address1, primaryAddr.address2].filter(Boolean).join(' ')
+          : stats.address || ''
         return {
           '고객 ID': customer.customerId,
           '이름': customer.name,
           '전화번호': customer.phone,
+          '주소': address,
           '총 사용 금액': totalAmount,
+          '이용 횟수': orderCount,
           '차단 여부': isBlocked ? '차단' : '정상',
           '차단 사유': customer.blockInfo?.blockedReason || '',
           '차단 일시': customer.blockInfo?.blockedAt || '',
@@ -304,6 +393,9 @@ const CustomerList = () => {
         { wch: 12 }, // 고객 ID
         { wch: 20 }, // 이름
         { wch: 18 }, // 전화번호
+        { wch: 35 }, // 주소
+        { wch: 14 }, // 총 사용 금액
+        { wch: 10 }, // 이용 횟수
         { wch: 12 }, // 차단 여부
         { wch: 30 }, // 차단 사유
         { wch: 20 }, // 차단 일시
@@ -344,15 +436,36 @@ const CustomerList = () => {
       render: (phone: string) => formatPhoneNumber(phone),
     },
     {
+      title: '주소',
+      key: 'address',
+      width: 200,
+      ellipsis: true,
+      render: (_: any, record: CustomerListResponse) => {
+        const addrs = record.addresses;
+        if (addrs?.length) {
+          const primary = addrs[0];
+          const addr = [primary.address1, primary.address2].filter(Boolean).join(' ');
+          if (addr) return addr;
+        }
+        return customerAddresses[record.customerId] || '-';
+      },
+    },
+    {
       title: '총 사용 금액',
       key: 'totalAmount',
-      width: 150,
+      width: 160,
       render: (_: any, record: CustomerListResponse) => {
         const amount = customerTotalAmounts[record.customerId] || 0;
+        const orderCount = customerOrderCounts[record.customerId] || 0;
         return (
-          <Typography.Text strong style={{ color: amount > 0 ? '#1890ff' : undefined }}>
-            {amount.toLocaleString()}원
-          </Typography.Text>
+          <div>
+            <Typography.Text strong style={{ color: amount > 0 ? '#1890ff' : undefined }}>
+              {amount.toLocaleString()}원
+            </Typography.Text>
+            <div style={{ fontSize: 12, color: '#666', marginTop: 2 }}>
+              {orderCount}회 이용
+            </div>
+          </div>
         );
       },
     },
@@ -471,7 +584,7 @@ const CustomerList = () => {
             columns={columns}
             dataSource={displayedCustomers}
             rowKey="customerId"
-            loading={isLoading || isLoadingOrders}
+            loading={isLoading}
             pagination={{
               current: currentPage,
               pageSize: pageSize,
