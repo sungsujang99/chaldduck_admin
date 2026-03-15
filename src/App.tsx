@@ -11,6 +11,7 @@ import OrderDetail from './pages/OrderDetail'
 import PolicyManagement from './pages/PolicyManagement'
 import NoticeManagement from './pages/NoticeManagement'
 import NotificationLog from './pages/NotificationLog'
+import CashReceiptManagement from './pages/CashReceiptManagement'
 import Login from './pages/Login'
 
 function App() {
@@ -71,6 +72,7 @@ function App() {
           <Route path="/orders/:orderId" element={<OrderDetail />} />
           <Route path="/policies" element={<PolicyManagement />} />
           <Route path="/notices" element={<NoticeManagement />} />
+          <Route path="/cash-receipts" element={<CashReceiptManagement />} />
           <Route path="/notifications" element={<NotificationLog />} />
         </Routes>
       </Layout>

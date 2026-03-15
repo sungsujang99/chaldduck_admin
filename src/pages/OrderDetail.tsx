@@ -513,13 +513,61 @@ const OrderDetail = () => {
             {order.address1} {order.address2}
           </Descriptions.Item>
           <Descriptions.Item label="현금영수증">
-            {order.cashReceipt && order.cashReceiptNo ? (
-              <Space direction="vertical" size={0}>
-                <Tag color="green">발급</Tag>
+            {order.cashReceiptIssued ? (
+              <Space>
+                <Tag color="green">발급완료</Tag>
+                {order.cashReceiptNo && <Typography.Text>{order.cashReceiptNo}</Typography.Text>}
+                <Button
+                  size="small"
+                  danger
+                  onClick={() => {
+                    Modal.confirm({
+                      title: '현금영수증 취소',
+                      content: '이 주문의 현금영수증을 취소하시겠습니까?',
+                      okText: '취소하기',
+                      okType: 'danger',
+                      cancelText: '닫기',
+                      onOk: async () => {
+                        try {
+                          await apiService.cancelCashReceipt(order.orderId)
+                          message.success('현금영수증이 취소되었습니다.')
+                          queryClient.invalidateQueries({ queryKey: ['order', orderId] })
+                        } catch (err: any) {
+                          message.error(err.response?.data?.message || '현금영수증 취소에 실패했습니다.')
+                        }
+                      },
+                    })
+                  }}
+                >
+                  취소
+                </Button>
+              </Space>
+            ) : order.cashReceipt && order.cashReceiptNo ? (
+              <Space>
+                <Tag color="orange">신청됨</Tag>
                 <Typography.Text>{order.cashReceiptNo}</Typography.Text>
+                <Button
+                  size="small"
+                  type="primary"
+                  onClick={async () => {
+                    try {
+                      const res = await apiService.issueCashReceiptBarobill(order.orderId)
+                      if (res.data?.issued) {
+                        message.success('현금영수증이 발급되었습니다.')
+                      } else {
+                        message.warning('현금영수증 발급 요청이 처리되었습니다.')
+                      }
+                      queryClient.invalidateQueries({ queryKey: ['order', orderId] })
+                    } catch (err: any) {
+                      message.error(err.response?.data?.message || '현금영수증 발급에 실패했습니다.')
+                    }
+                  }}
+                >
+                  발급
+                </Button>
               </Space>
             ) : (
-              <Tag color="default">미발급</Tag>
+              <Tag color="default">미신청</Tag>
             )}
           </Descriptions.Item>
         </Descriptions>
@@ -549,7 +597,7 @@ const OrderDetail = () => {
         <Card title="결제 정보" style={{ marginBottom: 24 }}>
           <Descriptions bordered>
             <Descriptions.Item label="결제 수단">
-              {payment.method === 'BANK_TRANSFER' ? '무통장 입금' : '카드'}
+              {payment.method === 'BANK_TRANSFER' ? '무통장 입금' : payment.method === 'ZEROPAY' ? '제로페이' : '카드'}
             </Descriptions.Item>
             <Descriptions.Item label="상태">
               <Tag

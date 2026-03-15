@@ -445,6 +445,7 @@ const Dashboard = () => {
   const getPaymentMethodText = (method?: string) => {
     if (!method) return '미결제'
     if (method === 'BANK_TRANSFER') return '무통장'
+    if (method === 'ZEROPAY') return '제로페이'
     if (method === 'CARD') return '카드'
     return method
   }
@@ -460,14 +461,12 @@ const Dashboard = () => {
       message.loading({ content: '상품 정보 조회 중...', key: 'excel-products' })
       // 상품 목록 조회 (매입가 매칭용)
       const productsResponse = await apiService.getProducts()
-      console.log('[Dashboard Excel Debug] 조회된 상품 목록:', productsResponse.data)
 
       // 할인 정책 조회 (픽업 할인가 계산용)
       message.loading({ content: '할인 정책 조회 중...', key: 'excel-discounts' })
       const discountPoliciesResponse = await apiService.getDiscountPolicies()
       const activePolicy = discountPoliciesResponse.data?.find(p => p.active)
       const discountRules = activePolicy?.rules || []
-      console.log('[Dashboard Excel Debug] 할인 규칙:', discountRules)
       message.destroy('excel-discounts')
       
       // 픽업 할인 규칙 찾기 헬퍼 함수 (PICKUP applyScope)
@@ -491,16 +490,28 @@ const Dashboard = () => {
         return unitPrice * quantity
       }
       
-      // productId로 매칭하는 Map
-      const productsMapById = new Map(
-        productsResponse.data.map(p => [p.productId, p.purchasePrice || 0])
-      )
-      // 상품명으로 매칭하는 Map (fallback)
-      const productsMapByName = new Map(
-        productsResponse.data.map(p => [p.name, p.purchasePrice || 0])
-      )
-      console.log('[Dashboard Excel Debug] 상품 Map (by ID):', Array.from(productsMapById.entries()))
-      console.log('[Dashboard Excel Debug] 상품 Map (by Name):', Array.from(productsMapByName.entries()))
+      const allProducts = productsResponse.data
+      const activeProductsList = allProducts.filter(p => !p.deletedAt)
+
+      // 활성 상품 이름 → 매입가 (최신 매입가, 삭제→재생성 후 새 상품 반영)
+      const activePriceByName = new Map<string, number>()
+      activeProductsList.forEach(p => {
+        if (p.name) activePriceByName.set(p.name, p.purchasePrice || 0)
+      })
+
+      // 전체 상품(삭제 포함) ID → 상품 정보 (과거 주문의 productId 매칭용)
+      const allProductById = new Map<number, typeof allProducts[0]>()
+      allProducts.forEach(p => {
+        allProductById.set(p.productId, p)
+      })
+
+      // 정규화된 이름 매칭용 (공백/특수문자 차이 허용)
+      const normalizedNameMap = new Map<string, number>()
+      activeProductsList.forEach(p => {
+        if (p.name) {
+          normalizedNameMap.set(p.name.trim().replace(/\s+/g, ' '), p.purchasePrice || 0)
+        }
+      })
       
       message.loading({ content: '엑셀 파일 생성 중...', key: 'excel' })
       const orders = ordersStatsData.data
@@ -532,8 +543,6 @@ const Dashboard = () => {
       
       ordersWithPayment.forEach((order) => {
         const items = order.items || []
-        console.log(`[Dashboard Excel Debug] 주문 ${order.orderNo} items:`, items)
-        
         // 주소 합치기 (건물명 포함) + 공동현관 분리
         const fullAddress = `${order.address1 || ''} ${order.address2 || ''} ${(order as any).address3 || ''}`.trim()
         const { address: cleanAddress, entranceCode } = extractEntranceCode(fullAddress)
@@ -544,21 +553,35 @@ const Dashboard = () => {
           const productId = item.productId
           const productName = item.productName
           
-          // 1차: productId로 매칭 시도
-          if (productId) {
-            purchasePriceUnit = productsMapById.get(productId) || 0
+          // 1차: 상품명으로 활성 상품 매칭 (매입가 수정 시 삭제→재생성으로 productId가 변경되므로 이름 우선)
+          if (productName && activePriceByName.has(productName)) {
+            purchasePriceUnit = activePriceByName.get(productName)!
           }
           
-          // 2차: productId가 없거나 매칭 실패시 상품명으로 매칭
+          // 2차: productId로 전체 상품(삭제 포함) 매칭
+          if (purchasePriceUnit === 0 && productId && allProductById.has(productId)) {
+            const matched = allProductById.get(productId)!
+            if (matched.deletedAt && matched.name) {
+              const replacementPrice = activePriceByName.get(matched.name)
+              purchasePriceUnit = replacementPrice !== undefined ? replacementPrice : (matched.purchasePrice || 0)
+            } else {
+              purchasePriceUnit = matched.purchasePrice || 0
+            }
+          }
+          
+          // 3차: 정규화된 이름으로 재시도 (공백/특수문자 차이 허용)
           if (purchasePriceUnit === 0 && productName) {
-            purchasePriceUnit = productsMapByName.get(productName) || 0
+            const normalized = productName.trim().replace(/\s+/g, ' ')
+            const found = normalizedNameMap.get(normalized)
+            if (found !== undefined) {
+              purchasePriceUnit = found
+            }
           }
           
           const quantity = item.quantity || 0
-          // lineTotal = 실제 청구액 (할인 반영됨)
-          const itemSalesPrice = item.lineTotal ?? (item.unitPrice || 0) * quantity  // 매출가 = 할인 적용된 실제 금액
-          const salesUnitPrice = quantity > 0 ? Math.round(itemSalesPrice / quantity) : (item.unitPrice || 0)  // 적용단가
-          const itemPurchasePrice = purchasePriceUnit * quantity  // 매입가 = 매입단가 * 수량
+          const itemSalesPrice = item.lineTotal ?? (item.unitPrice || 0) * quantity
+          const salesUnitPrice = quantity > 0 ? Math.round(itemSalesPrice / quantity) : (item.unitPrice || 0)
+          const itemPurchasePrice = purchasePriceUnit * quantity
 
           // 픽업 할인가 (참고용) - 픽업 주문은 이미 할인 적용됨, 배송 주문은 픽업 시 할인가 참고
           let pickupPrice: number | string = '-'
@@ -575,8 +598,6 @@ const Dashboard = () => {
           const orderDiscount = itemIndex === 0 ? (order.discountAmount || 0) : ''
           const orderFinalAmount = itemIndex === 0 ? (order.finalAmount || 0) : ''
           const deliveryFee = itemIndex === 0 ? (order.deliveryFee || 0) : ''
-          
-          console.log(`[Dashboard Excel Debug] 상품명=${productName}, 매출가(실제)=${itemSalesPrice}, 픽업가=${pickupPrice}, 할인=${order.discountAmount}, 최종=${order.finalAmount}`)
           
           excelData.push({
             '년월일': order.orderedAt ? dayjs(order.orderedAt).format('YYYY-MM-DD') : '-',

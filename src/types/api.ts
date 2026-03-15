@@ -107,6 +107,7 @@ export interface OrderResponse {
   finalAmount: number;
   cashReceipt?: boolean;
   cashReceiptNo?: string;
+  cashReceiptIssued?: boolean;
   fulfillmentType: FulfillmentType;
   deliveryStatus: DeliveryStatus;
   carrier?: string; // 택배사
@@ -118,7 +119,7 @@ export interface OrderResponse {
 }
 
 // Payment types
-export type PaymentMethod = 'BANK_TRANSFER' | 'CARD';
+export type PaymentMethod = 'BANK_TRANSFER' | 'ZEROPAY' | 'CARD';
 export type PaymentStatus = 'READY' | 'PAID' | 'FAILED' | 'CANCELED';
 
 export interface PaymentCreateRequest {
@@ -624,6 +625,11 @@ export interface FeatureFlagResponse {
 // Cash Receipt types
 export interface CashReceiptNoUpdateRequest {
   cashReceiptNo: string;
+}
+
+export interface CashReceiptIssueResponse {
+  issued: boolean;
+  mgtKey?: string;
 }
 
 // Pagination types

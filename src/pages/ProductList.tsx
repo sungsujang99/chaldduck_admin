@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Card,
@@ -24,6 +24,7 @@ import { PlusOutlined, ReloadOutlined, DeleteOutlined, GiftOutlined, Exclamation
 import {
   DndContext,
   closestCenter,
+  pointerWithin,
   KeyboardSensor,
   PointerSensor,
   useSensor,
@@ -104,11 +105,113 @@ const getCategoryInfo = (categoryValue?: string, categories?: CategoryInfo[]): C
   return cats.find(c => c.value === categoryValue)
 }
 
-// 드래그 가능한 상품 아이템 컴포넌트
+// 카테고리 + 상품 묶음 (전시 순서용)
+type CategoryWithProducts = { category: AdminCategoryRow; products: AdminProductStockRow[] }
+
+// 드래그 가능한 상품 아이템 (카테고리 내부용)
 interface SortableProductItemProps {
   product: AdminProductStockRow
   index: number
   categories: CategoryInfo[]
+}
+
+// 드래그 가능한 카테고리 블록 (헤더 + 내부 상품들)
+interface SortableCategoryBlockProps {
+  categoryWithProducts: CategoryWithProducts
+  categoryIndex: number
+  categories: CategoryInfo[]
+  onProductDragEnd: (event: DragEndEvent, categoryId: number) => void
+}
+
+const getCategorySortableId = (cwp: CategoryWithProducts) =>
+  cwp.category.categoryId < 0 ? 'cat-uncat' : `cat-${cwp.category.categoryId}`
+
+const SortableCategoryBlock = ({ categoryWithProducts, categoryIndex, categories, onProductDragEnd }: SortableCategoryBlockProps) => {
+  const { category, products } = categoryWithProducts
+  const sortableId = getCategorySortableId(categoryWithProducts)
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: sortableId })
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  }
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        ...style,
+        marginBottom: 16,
+        border: isDragging ? '2px solid #52c41a' : '1px solid #e8e8e8',
+        borderRadius: 8,
+        overflow: 'hidden',
+        backgroundColor: isDragging ? '#f6ffed' : '#fafafa',
+        boxShadow: isDragging ? '0 4px 12px rgba(0,0,0,0.15)' : 'none',
+      }}
+    >
+      {/* 카테고리 헤더 - 드래그로 카테고리 순서 변경 */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          padding: '12px 16px',
+          backgroundColor: '#f0f9eb',
+          cursor: 'grab',
+          borderBottom: '1px solid #e8e8e8',
+        }}
+        {...attributes}
+        {...listeners}
+      >
+        <HolderOutlined style={{ color: '#999', fontSize: 16, marginRight: 8 }} />
+        <Tag color="green" style={{ minWidth: 28, textAlign: 'center', fontWeight: 'bold' }}>
+          {categoryIndex + 1}
+        </Tag>
+        <Typography.Text strong style={{ fontSize: 14 }}>{category.name}</Typography.Text>
+        <Typography.Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+          ({products.length}개 상품)
+        </Typography.Text>
+      </div>
+      {/* 카테고리 내 상품 목록 - 드래그로 상품 순서 변경 */}
+      <div style={{ padding: '8px 12px 12px' }}>
+        {products.length > 0 ? (
+          <DndContext
+            sensors={useSensors(
+              useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+              useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+            )}
+            collisionDetection={closestCenter}
+            onDragEnd={(e) => onProductDragEnd(e, category.categoryId)}
+          >
+            <SortableContext
+              items={products.map(p => p.productId)}
+              strategy={verticalListSortingStrategy}
+            >
+              {products.map((product, idx) => (
+                <SortableProductItem
+                  key={product.productId}
+                  product={product}
+                  index={idx}
+                  categories={categories}
+                />
+              ))}
+            </SortableContext>
+          </DndContext>
+        ) : (
+          <Typography.Text type="secondary" style={{ fontSize: 12, padding: '8px 0' }}>
+            전시 중인 상품이 없습니다.
+          </Typography.Text>
+        )}
+      </div>
+    </div>
+  )
 }
 
 const SortableProductItem = ({ product, index, categories }: SortableProductItemProps) => {
@@ -156,9 +259,9 @@ const SortableProductItem = ({ product, index, categories }: SortableProductItem
           {index + 1}
         </Tag>
         <Typography.Text strong style={{ fontSize: 14 }}>{product.name}</Typography.Text>
-        {product.category && (
-          <Tag color={getCategoryInfo(product.category, categories)?.color}>
-            {getCategoryInfo(product.category, categories)?.label}
+        {(product.categoryCode || product.category) && (
+          <Tag color={getCategoryInfo(product.categoryCode || product.category, categories)?.color}>
+            {product.categoryName || getCategoryInfo(product.categoryCode || product.category, categories)?.label}
           </Tag>
         )}
       </Space>
@@ -195,9 +298,10 @@ const ProductList = () => {
   const [categories] = useState<CategoryInfo[]>(loadCategories())  // 로컬 카테고리 (일부 기능에서 사용)
   const [editingServerCategory, setEditingServerCategory] = useState<AdminCategoryRow | null>(null)
   const [categoryEditForm] = Form.useForm()
-  // 상품 전시 순서 변경 관련 상태
+  // 상품 전시 순서 변경 관련 상태 (카테고리 안에 상품 포함)
   const [isReorderModalOpen, setIsReorderModalOpen] = useState(false)
-  const [reorderList, setReorderList] = useState<AdminProductStockRow[]>([])
+  const [reorderData, setReorderData] = useState<CategoryWithProducts[]>([])
+  const [isSavingReorder, setIsSavingReorder] = useState(false)
   // 상품 선택 관련 상태
   const [selectedProductIds, setSelectedProductIds] = useState<number[]>([])
   const [isRefreshing, setIsRefreshing] = useState(false)
@@ -563,7 +667,7 @@ const ProductList = () => {
     onSuccess: () => {
       message.success('상품 순서가 변경되었습니다.')
       setIsReorderModalOpen(false)
-      setReorderList([])
+      setReorderData([])
       queryClient.invalidateQueries({ queryKey: ['products'] })
       refetch()
     },
@@ -585,32 +689,145 @@ const ProductList = () => {
     })
   )
 
-  // 상품 순서 변경 모달 열기
+  // 상품 목록 → 카테고리별 그룹 데이터 생성 (테이블 순서 반영)
+  const buildReorderDataFromProducts = (products: AdminProductStockRow[]): CategoryWithProducts[] => {
+    const activeProductsList = products.filter(p => !p.deletedAt)
+    const displayProductsList = activeProductsList.filter(p => p.active !== false)
+    const sortedProducts = [...displayProductsList].sort((a, b) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999))
+    const categoryMap = new Map<string | number, AdminCategoryRow>()
+    serverCategories.filter(c => c.active !== false).forEach(cat => {
+      categoryMap.set(cat.categoryId, cat)
+      categoryMap.set(cat.code, cat)
+    })
+    const categoryOrder: AdminCategoryRow[] = []
+    const seen = new Set<number>()
+    for (const p of sortedProducts) {
+      const cat = p.categoryId != null ? categoryMap.get(p.categoryId) : categoryMap.get(p.categoryCode || '')
+      if (cat && !seen.has(cat.categoryId)) {
+        seen.add(cat.categoryId)
+        categoryOrder.push(cat)
+      }
+    }
+    const uncategorized = sortedProducts.filter(p => {
+      const cat = p.categoryId != null ? categoryMap.get(p.categoryId) : categoryMap.get(p.categoryCode || '')
+      return !cat
+    })
+    if (uncategorized.length > 0) {
+      categoryOrder.push({ categoryId: -1, code: 'UNCATEGORIZED', name: '미분류', active: true, sortOrder: 999 })
+    }
+    serverCategories.filter(c => c.active !== false && !seen.has(c.categoryId)).forEach(cat => {
+      categoryOrder.push(cat)
+    })
+    return categoryOrder.map(cat => ({
+      category: cat,
+      products: cat.categoryId < 0 ? uncategorized : sortedProducts.filter(p => p.categoryId === cat.categoryId || p.categoryCode === cat.code),
+    }))
+  }
+
+  // 상품 순서 변경 모달 열기 - 캐시 데이터로 즉시 오픈 (로딩 지연 방지)
   const handleOpenReorderModal = () => {
-    // sortOrder 기준으로 정렬된 상품 목록 복사
-    const sortedProducts = [...activeProducts].sort((a, b) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999))
-    setReorderList(sortedProducts)
+    const products = productsData?.data || []
+    const data = buildReorderDataFromProducts(products)
+    setReorderData(data)
+    reorderDataRef.current = data
     setIsReorderModalOpen(true)
   }
 
-  // 드래그 앤 드롭 완료 핸들러
-  const handleDragEnd = (event: DragEndEvent) => {
+  // reorderData ref로 저장 시 최신값 보장 (드래그 후 즉시 저장 시 state 미반영 방지)
+  const reorderDataRef = useRef<CategoryWithProducts[]>([])
+  useEffect(() => {
+    reorderDataRef.current = reorderData
+  }, [reorderData])
+
+  // 카테고리 드래그 완료 (카테고리 블록 전체 이동)
+  // over.id가 상품 ID(숫자)일 수 있음: 내부 DndContext 영역에 드롭 시 → 해당 상품의 카테고리로 인식
+  const handleCategoryDragEnd = (event: DragEndEvent) => {
     const { active, over } = event
-    
-    if (over && active.id !== over.id) {
-      const oldIndex = reorderList.findIndex(item => item.productId === active.id)
-      const newIndex = reorderList.findIndex(item => item.productId === over.id)
-      setReorderList(arrayMove(reorderList, oldIndex, newIndex))
-    }
+    if (!over || active.id === over.id) return
+
+    setReorderData(prev => {
+      const oldIdx = prev.findIndex(d => getCategorySortableId(d) === active.id)
+      let newIdx = prev.findIndex(d => getCategorySortableId(d) === over.id)
+      if (newIdx < 0 && typeof over.id === 'number') {
+        const cwp = prev.find(d => d.products.some(p => p.productId === over.id))
+        if (cwp) newIdx = prev.findIndex(d => getCategorySortableId(d) === getCategorySortableId(cwp))
+      }
+      if (oldIdx >= 0 && newIdx >= 0) {
+        return arrayMove(prev, oldIdx, newIdx)
+      }
+      return prev
+    })
   }
 
-  // 상품 순서 저장
-  const handleSaveReorder = () => {
-    const items: ProductOrderItem[] = reorderList.map((product, index) => ({
-      productId: product.productId,
-      sortOrder: index + 1, // 1부터 시작
-    }))
-    reorderProductsMutation.mutate({ items })
+  // 상품 드래그 완료 (카테고리 내에서만 순서 변경)
+  const handleProductDragEnd = (event: DragEndEvent, categoryId: number) => {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+
+    setReorderData(prev =>
+      prev.map(cwp => {
+        if (cwp.category.categoryId !== categoryId) return cwp
+        const oldIdx = cwp.products.findIndex(p => p.productId === active.id)
+        const newIdx = cwp.products.findIndex(p => p.productId === over.id)
+        if (oldIdx < 0 || newIdx < 0) return cwp
+        return { ...cwp, products: arrayMove(cwp.products, oldIdx, newIdx) }
+      })
+    )
+  }
+
+  // 상품·카테고리 순서 저장
+  // API는 전체 상품 목록 전송 권장 → 전시 OFF 상품도 끝에 포함
+  // reorderDataRef 사용: 카테고리 드래그 직후 저장 시 state 미반영 방지
+  const handleSaveReorder = async () => {
+    const dataToSave = reorderDataRef.current
+    const items: ProductOrderItem[] = []
+    let sortOrder = 1
+    dataToSave.forEach(cwp => {
+      cwp.products.forEach(p => {
+        items.push({ productId: p.productId, sortOrder })
+        sortOrder++
+      })
+    })
+    // 전시 OFF 상품도 포함 (API 전체 목록 권장)
+    const displayIds = new Set(items.map(i => i.productId))
+    const hidden = activeProducts
+      .filter(p => !displayIds.has(p.productId))
+      .sort((a, b) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999))
+    hidden.forEach(p => {
+      items.push({ productId: p.productId, sortOrder })
+      sortOrder++
+    })
+
+    if (items.length === 0) {
+      message.warning('저장할 상품이 없습니다.')
+      return
+    }
+
+    setIsSavingReorder(true)
+    try {
+      // 1. 카테고리 sortOrder 저장 (병렬)
+      const realCategories = dataToSave.filter(d => d.category.categoryId > 0)
+      await Promise.all(
+        realCategories.map((cwp, i) =>
+          apiService.updateCategory(cwp.category.categoryId, { sortOrder: i + 1 })
+        )
+      )
+      // 2. 상품 sortOrder 저장
+      await reorderProductsMutation.mutateAsync({ items })
+      message.success('전시 순서가 저장되었습니다.')
+      setIsReorderModalOpen(false)
+      setReorderData([])
+      queryClient.invalidateQueries({ queryKey: ['products'] })
+      queryClient.invalidateQueries({ queryKey: ['adminCategories'] })
+      refetch()
+      queryClient.refetchQueries({ queryKey: ['adminCategories'] })
+    } catch (error: any) {
+      console.error('[ProductList] 순서 저장 실패:', error)
+      message.error(error?.response?.data?.message || '순서 저장에 실패했습니다.')
+      throw error
+    } finally {
+      setIsSavingReorder(false)
+    }
   }
 
   // const handleEditStock = (product: AdminProductStockRow) => {
@@ -1732,12 +1949,12 @@ const ProductList = () => {
     return products.filter(p => !p.deletedAt)
   }, [products])
 
-  // 카테고리별 상품 필터링 (서버 categoryCode 기준)
+  // 카테고리별 상품 필터링 + 전시순서(sortOrder) 정렬 (테이블·모달 공통)
   const filteredProducts = useMemo(() => {
-    if (selectedCategoryFilter === 'ALL') {
-      return activeProducts
-    }
-    return activeProducts.filter(p => p.categoryCode === selectedCategoryFilter)
+    const list = selectedCategoryFilter === 'ALL'
+      ? activeProducts
+      : activeProducts.filter(p => p.categoryCode === selectedCategoryFilter)
+    return [...list].sort((a, b) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999))
   }, [activeProducts, selectedCategoryFilter])
 
   // 카테고리별 통계 (서버 카테고리 기반, 활성 상품만)
@@ -2749,51 +2966,66 @@ WHERE category IS NULL OR tax_type IS NULL;`}
         </Form>
       </Modal>
 
-      {/* 상품 전시 순서 변경 모달 */}
+      {/* 상품·카테고리 전시 순서 변경 모달 (카테고리 안에 상품, 전시 ON 상품만) */}
       <Modal
-        title="상품 전시 순서 변경"
+        title="전시 순서 변경"
         open={isReorderModalOpen}
         onOk={handleSaveReorder}
         onCancel={() => {
           setIsReorderModalOpen(false)
-          setReorderList([])
+          setReorderData([])
         }}
-        confirmLoading={reorderProductsMutation.isPending}
+        confirmLoading={isSavingReorder}
         width={700}
         okText="저장"
         cancelText="취소"
       >
-        <div style={{ marginBottom: 16 }}>
+        <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
           <Space direction="vertical" size={4}>
             <Typography.Text type="secondary">
               <HolderOutlined style={{ marginRight: 8 }} />
-              상품을 드래그하여 순서를 변경하세요. 위에 있는 상품이 먼저 표시됩니다.
+              카테고리 헤더를 드래그하면 해당 카테고리와 상품이 함께 이동합니다. 상품은 카테고리 내에서만 순서를 변경할 수 있습니다. (전시 ON 상품만 표시)
             </Typography.Text>
           </Space>
+          <Button
+            size="small"
+            icon={<ReloadOutlined />}
+            onClick={async () => {
+              const { data: freshData } = await refetch()
+              const products = freshData?.data || []
+              const data = buildReorderDataFromProducts(products)
+              setReorderData(data)
+              reorderDataRef.current = data
+              message.success('목록을 새로고침했습니다.')
+            }}
+          >
+            새로고침
+          </Button>
         </div>
-        <div style={{ maxHeight: 450, overflowY: 'auto', padding: '4px' }}>
-          {reorderList.length > 0 ? (
+        <div style={{ maxHeight: 520, overflowY: 'auto', padding: '4px' }}>
+          {reorderData.length > 0 ? (
             <DndContext
               sensors={sensors}
-              collisionDetection={closestCenter}
-              onDragEnd={handleDragEnd}
+              collisionDetection={pointerWithin}
+              onDragEnd={handleCategoryDragEnd}
             >
               <SortableContext
-                items={reorderList.map(p => p.productId)}
+                items={reorderData.map(d => getCategorySortableId(d))}
                 strategy={verticalListSortingStrategy}
               >
-                {reorderList.map((product, index) => (
-                  <SortableProductItem
-                    key={product.productId}
-                    product={product}
-                    index={index}
+                {reorderData.map((cwp, index) => (
+                  <SortableCategoryBlock
+                    key={cwp.category.categoryId}
+                    categoryWithProducts={cwp}
+                    categoryIndex={index}
                     categories={categories}
+                    onProductDragEnd={handleProductDragEnd}
                   />
                 ))}
               </SortableContext>
             </DndContext>
           ) : (
-            <Typography.Text type="secondary">표시할 상품이 없습니다.</Typography.Text>
+            <Typography.Text type="secondary">표시할 카테고리/상품이 없습니다.</Typography.Text>
           )}
         </div>
       </Modal>

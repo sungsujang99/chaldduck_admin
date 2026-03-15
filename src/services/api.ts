@@ -47,6 +47,7 @@ import type {
   FeatureFlagResponse,
   FeatureKey,
   CashReceiptNoUpdateRequest,
+  CashReceiptIssueResponse,
   PageOrderResponse,
   PageCustomerListResponse,
   CustomerBlockUpdateRequest,
@@ -277,11 +278,23 @@ class ApiService {
     return response.data;
   }
 
+  async issueCashReceiptBarobill(orderId: number): Promise<JsonBody<CashReceiptIssueResponse>> {
+    const response = await this.client.post(`/api/v1/admin/orders/${orderId}/cash-receipts/issue`);
+    return response.data;
+  }
+
+  async cancelCashReceipt(orderId: number): Promise<JsonBody<void>> {
+    const response = await this.client.post(`/api/v1/admin/orders/orders/${orderId}/cancel`);
+    return response.data;
+  }
+
+  /** @deprecated Use issueCashReceiptBarobill instead */
   async issueCashReceipt(orderId: number, data: CashReceiptNoUpdateRequest): Promise<JsonBody<void>> {
     const response = await this.client.post(`/api/v1/admin/orders/${orderId}/cash-receipt`, data);
     return response.data;
   }
 
+  /** @deprecated */
   async updateCashReceipt(orderId: number, data: CashReceiptNoUpdateRequest): Promise<JsonBody<void>> {
     const response = await this.client.put(`/api/v1/admin/orders/${orderId}/cash-receipt`, data);
     return response.data;
@@ -1026,7 +1039,9 @@ class ApiService {
     return response.data;
   }
 
+  // PATCH /api/v1/admin/product-categories/{categoryId} | body: { sortOrder?, name?, active? }
   async updateCategory(categoryId: number, data: AdminCategoryUpdateRequest): Promise<JsonBody<AdminCategoryRow>> {
+    console.log(`[updateCategory] PATCH /api/v1/admin/product-categories/${categoryId}`, JSON.stringify(data));
     const response = await this.client.patch(`/api/v1/admin/product-categories/${categoryId}`, data);
     return response.data;
   }
@@ -1037,8 +1052,11 @@ class ApiService {
   }
 
   // Admin - Product Reorder API
+  // PUT /api/v1/admin/products/reorder | body: { items: [{ productId, sortOrder }] }
   async reorderProducts(data: ProductReorderRequest): Promise<JsonBody<void>> {
+    console.log('[reorderProducts] PUT /api/v1/admin/products/reorder', JSON.stringify(data, null, 2));
     const response = await this.client.put('/api/v1/admin/products/reorder', data);
+    console.log('[reorderProducts] 응답:', response.status, response.data);
     return response.data;
   }
 

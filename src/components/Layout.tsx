@@ -12,6 +12,7 @@ import {
   LogoutOutlined,
   NotificationOutlined,
   MessageOutlined,
+  FileProtectOutlined,
 } from '@ant-design/icons'
 import type { MenuProps } from 'antd'
 
@@ -78,6 +79,11 @@ const Layout = ({ children, onLogout }: LayoutProps) => {
       label: '주문 관리',
     },
     {
+      key: '/cash-receipts',
+      icon: <FileProtectOutlined />,
+      label: '현금영수증',
+    },
+    {
       key: '/policies',
       icon: <SettingOutlined />,
       label: '정책 관리',
@@ -100,6 +106,7 @@ const Layout = ({ children, onLogout }: LayoutProps) => {
     if (path.startsWith('/products')) return ['/products']
     if (path.startsWith('/customers')) return ['/customers']
     if (path.startsWith('/orders')) return ['/orders']
+    if (path.startsWith('/cash-receipts')) return ['/cash-receipts']
     if (path.startsWith('/policies')) return ['/policies']
     if (path.startsWith('/notices')) return ['/notices']
     if (path.startsWith('/notifications')) return ['/notifications']

@@ -886,7 +886,10 @@ const OrderList = () => {
   }
 
   const getPaymentMethodText = (method?: PaymentMethod) => {
-    return method === 'BANK_TRANSFER' ? '무통장 입금' : method === 'CARD' ? '카드' : '-'
+    if (method === 'BANK_TRANSFER') return '무통장 입금'
+    if (method === 'ZEROPAY') return '제로페이'
+    if (method === 'CARD') return '카드'
+    return '-'
   }
 
   // 전화번호 포맷팅 (010-1234-5678 형식)
@@ -928,21 +931,48 @@ const OrderList = () => {
   // 엑셀 생성 공통 함수
   const generateExcel = async (orders: OrderResponse[], filePrefix: string) => {
     try {
-      // 상품 목록 조회 (매입가 매칭용)
       message.loading({ content: '상품 정보 조회 중...', key: 'excel-products' })
-      const productsResponse = await apiService.getProducts()
-      console.log('[Excel Debug] 조회된 상품 목록:', productsResponse.data)
+      const [productsResponse, discountPoliciesResponse] = await Promise.all([
+        apiService.getProducts(),
+        apiService.getDiscountPolicies(),
+      ])
       
-      // productId로 매칭하는 Map
-      const productsMapById = new Map(
-        productsResponse.data.map(p => [p.productId, p.purchasePrice || 0])
-      )
-      // 상품명으로 매칭하는 Map (fallback)
-      const productsMapByName = new Map(
-        productsResponse.data.map(p => [p.name, p.purchasePrice || 0])
-      )
-      console.log('[Excel Debug] 상품 Map (by ID):', Array.from(productsMapById.entries()))
-      console.log('[Excel Debug] 상품 Map (by Name):', Array.from(productsMapByName.entries()))
+      const allProducts = productsResponse.data
+      const activePolicy = discountPoliciesResponse.data?.find((p: any) => p.active)
+      const discountRules = activePolicy?.rules || []
+      
+      const getPickupDiscountRule = (productId: number) =>
+        discountRules.find(
+          (r: any) => r.targetProductId === productId && r.active && r.applyScope === 'PICKUP'
+        )
+      const calcPickupPrice = (unitPrice: number, quantity: number, rule: any): number => {
+        if (!rule) return unitPrice * quantity
+        if (rule.amountOff != null) return Math.max(0, (unitPrice - rule.amountOff) * quantity)
+        if (rule.discountRate != null) return Math.floor(unitPrice * (1 - rule.discountRate / 100) * quantity)
+        return unitPrice * quantity
+      }
+      const activeProducts = allProducts.filter(p => !p.deletedAt)
+
+      // 활성 상품 이름 → 매입가 (최신 매입가, 삭제→재생성 후 새 상품 반영)
+      const activePriceByName = new Map<string, number>()
+      activeProducts.forEach(p => {
+        if (p.name) activePriceByName.set(p.name, p.purchasePrice || 0)
+      })
+
+      // 전체 상품(삭제 포함) ID → 상품 정보 (과거 주문의 productId 매칭용)
+      const allProductById = new Map<number, typeof allProducts[0]>()
+      allProducts.forEach(p => {
+        allProductById.set(p.productId, p)
+      })
+
+      // 정규화된 이름 매칭용 (공백/특수문자 차이 허용)
+      const normalizedNameMap = new Map<string, number>()
+      activeProducts.forEach(p => {
+        if (p.name) {
+          normalizedNameMap.set(p.name.trim().replace(/\s+/g, ' '), p.purchasePrice || 0)
+        }
+      })
+      
       message.destroy('excel-products')
       
       // 엑셀 데이터 준비 - 상품별로 한 줄씩
@@ -950,37 +980,49 @@ const OrderList = () => {
       
       orders.forEach((order) => {
         const items = order.items || []
-        console.log(`[Excel Debug] 주문 ${order.orderNo} items:`, items)
-        
         // 주소 합치기 (건물명 포함) + 공동현관 분리
         const fullAddress = `${order.address1 || ''} ${order.address2 || ''} ${order.address3 || ''}`.trim()
         const { address: cleanAddress, entranceCode } = extractEntranceCode(fullAddress)
         
-        // 각 상품별로 개별 행 생성
         items.forEach((item, itemIndex) => {
           let purchasePriceUnit = 0
           const productId = item.productId
           const productName = item.productName
           
-          // 1차: productId로 매칭 시도
-          if (productId) {
-            purchasePriceUnit = productsMapById.get(productId) || 0
+          // 1차: 상품명으로 활성 상품 매칭 (매입가 수정 시 삭제→재생성으로 productId가 변경되므로 이름 우선)
+          if (productName && activePriceByName.has(productName)) {
+            purchasePriceUnit = activePriceByName.get(productName)!
           }
           
-          // 2차: productId가 없거나 매칭 실패시 상품명으로 매칭
+          // 2차: productId로 전체 상품(삭제 포함) 매칭
+          if (purchasePriceUnit === 0 && productId && allProductById.has(productId)) {
+            const matched = allProductById.get(productId)!
+            if (matched.deletedAt && matched.name) {
+              const replacementPrice = activePriceByName.get(matched.name)
+              purchasePriceUnit = replacementPrice !== undefined ? replacementPrice : (matched.purchasePrice || 0)
+            } else {
+              purchasePriceUnit = matched.purchasePrice || 0
+            }
+          }
+          
+          // 3차: 정규화된 이름으로 재시도 (공백/특수문자 차이 허용)
           if (purchasePriceUnit === 0 && productName) {
-            purchasePriceUnit = productsMapByName.get(productName) || 0
+            const normalized = productName.trim().replace(/\s+/g, ' ')
+            const found = normalizedNameMap.get(normalized)
+            if (found !== undefined) {
+              purchasePriceUnit = found
+            }
           }
           
           const quantity = item.quantity || 0
           const unitPrice = item.unitPrice || 0
           const lineTotal = item.lineTotal ?? unitPrice * quantity
-          // 매출가 = 주문 할인을 비율로 분배한 실제 청구액 (subtotalAmount 기준)
-          const orderSubtotal = order.subtotalAmount || 0
-          const orderDiscount = order.discountAmount || 0
-          const discountRatio = orderSubtotal > 0 && orderDiscount > 0 ? 1 - orderDiscount / orderSubtotal : 1
-          const itemSalesPrice = Math.round(lineTotal * discountRatio)  // 할인 적용된 매출가
+          const itemSalesPrice =
+            order.fulfillmentType === 'PICKUP' && productId
+              ? calcPickupPrice(unitPrice, quantity, getPickupDiscountRule(productId))
+              : lineTotal
           const itemPurchasePrice = purchasePriceUnit * quantity
+          const orderDiscount = itemIndex === 0 ? (order.discountAmount || 0) : ''
           const orderFinalAmount = itemIndex === 0 ? (order.finalAmount || 0) : ''
           
           excelData.push({
@@ -993,6 +1035,7 @@ const OrderList = () => {
             '수량': quantity,
             '단가': unitPrice,  // 할인전 금액
             '매출가': itemSalesPrice,
+            '할인금액': orderDiscount,  // 주문 전체 할인 (첫 번째 상품 행에만)
             '배송비': itemIndex === 0 ? (order.deliveryFee || 0) : '',  // 첫 번째 상품에만 배송비 표시
             '최종금액': orderFinalAmount,  // 주문 최종 결제액
             '배송지주소': cleanAddress || '-',
@@ -1019,6 +1062,7 @@ const OrderList = () => {
       { wch: 8 },   // 수량
       { wch: 12 },  // 단가
       { wch: 12 },  // 매출가
+      { wch: 10 },  // 할인금액
       { wch: 10 },  // 배송비
       { wch: 12 },  // 최종금액
       { wch: 50 },  // 배송지주소
@@ -1246,7 +1290,7 @@ const OrderList = () => {
             {formatCurrency(record.finalAmount)}
           </Typography.Text>
           {record.paymentMethod ? (
-            <Tag color={record.paymentMethod === 'BANK_TRANSFER' ? 'blue' : 'green'} style={{ fontSize: 11 }}>
+            <Tag color={record.paymentMethod === 'BANK_TRANSFER' ? 'blue' : record.paymentMethod === 'ZEROPAY' ? 'purple' : 'green'} style={{ fontSize: 11 }}>
               {getPaymentMethodText(record.paymentMethod)}
             </Tag>
           ) : (
@@ -1266,10 +1310,22 @@ const OrderList = () => {
         onResize: handleResize('cashReceipt'),
       }),
       render: (cashReceipt: boolean | undefined, record: OrderResponse) => {
+        if (record.cashReceiptIssued) {
+          return (
+            <Space direction="vertical" size={0}>
+              <Tag color="green" style={{ fontSize: 11 }}>발급완료</Tag>
+              {record.cashReceiptNo && (
+                <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                  {record.cashReceiptNo}
+                </Typography.Text>
+              )}
+            </Space>
+          )
+        }
         if (cashReceipt && record.cashReceiptNo) {
           return (
             <Space direction="vertical" size={0}>
-              <Tag color="green" style={{ fontSize: 11 }}>발급</Tag>
+              <Tag color="orange" style={{ fontSize: 11 }}>신청</Tag>
               <Typography.Text type="secondary" style={{ fontSize: 11 }}>
                 {record.cashReceiptNo}
               </Typography.Text>
@@ -1693,6 +1749,7 @@ const OrderList = () => {
               >
                 <Option value="ALL">전체</Option>
                 <Option value="BANK_TRANSFER">무통장 입금</Option>
+                <Option value="ZEROPAY">제로페이</Option>
                 <Option value="CARD">카드</Option>
               </Select>
             </Space>
