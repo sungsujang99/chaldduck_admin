@@ -10,12 +10,15 @@ const CashReceiptManagement = () => {
   const navigate = useNavigate()
   const [activeTab, setActiveTab] = useState<'pending' | 'issued'>('pending')
   const [ordersData, setOrdersData] = useState<OrderResponse[]>([])
+  const [productTaxMap, setProductTaxMap] = useState<Record<number, string>>({})
+  const [productTaxByName, setProductTaxByName] = useState<Record<string, string>>({})
   const [isLoading, setIsLoading] = useState(true)
   const [loadTrigger, setLoadTrigger] = useState(0)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [issuingOrderId, setIssuingOrderId] = useState<number | null>(null)
   const [cancelingOrderId, setCancelingOrderId] = useState<number | null>(null)
   const [bulkProgress, setBulkProgress] = useState<{ current: number; total: number; success: number; fail: number } | null>(null)
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
   const bulkCancelRef = useRef(false)
 
   const refetch = useCallback(() => {
@@ -28,35 +31,58 @@ const CashReceiptManagement = () => {
 
     const load = async () => {
       try {
+        const productsRes = await apiService.getProducts().catch(() => ({ data: [] }))
+        const products = Array.isArray(productsRes?.data) ? productsRes.data : Array.isArray(productsRes) ? productsRes : []
+        const taxMap: Record<number, string> = {}
+        const taxByName: Record<string, string> = {}
+        products.forEach((p: { productId?: number; name?: string; taxType?: string }) => {
+          if (p.productId != null && p.taxType) taxMap[p.productId] = p.taxType
+          if (p.name && p.taxType) {
+            const norm = p.name.trim().replace(/\s+/g, ' ')
+            taxByName[norm] = p.taxType
+            taxByName[p.name.trim()] = p.taxType
+          }
+        })
+        if (!cancelled) {
+          setProductTaxMap(taxMap)
+          setProductTaxByName(taxByName)
+        }
+
         const allOrders: OrderResponse[] = []
         let page = 0
         const fetchPageSize = 100
-
         while (true) {
           const response = await apiService.getAllOrdersAdmin({ page, size: fetchPageSize })
           let orders: OrderResponse[] = []
           let isLastPage = true
 
-          if (response.data) {
-            if (Array.isArray(response.data)) {
-              orders = response.data
+          const pageData = (response as any)?.data ?? response
+          if (pageData) {
+            if (Array.isArray(pageData)) {
+              orders = pageData
               isLastPage = orders.length < fetchPageSize
-            } else if (response.data.content) {
-              orders = response.data.content
-              isLastPage = response.data.last === true || orders.length < fetchPageSize
+            } else if (pageData.content) {
+              orders = pageData.content
+              isLastPage = pageData.last === true || orders.length < fetchPageSize
             }
           }
 
-          if (orders.length === 0) break
+          if (orders.length === 0) {
+            if (!cancelled) {
+              setOrdersData([...allOrders])
+              setIsLoading(false)
+            }
+            break
+          }
           if (cancelled) return
 
           allOrders.push(...orders)
+          if (!cancelled) {
+            setOrdersData([...allOrders])
+            setIsLoading(false)
+          }
           if (isLastPage) break
           page++
-        }
-
-        if (!cancelled) {
-          setOrdersData(allOrders)
         }
       } catch (err: any) {
         if (!cancelled) {
@@ -97,6 +123,37 @@ const CashReceiptManagement = () => {
 
   const displayedOrders = activeTab === 'pending' ? pendingOrders : issuedOrders
 
+  const handleTabChange = (tab: 'pending' | 'issued') => {
+    setActiveTab(tab)
+    setSelectedRowKeys([])
+  }
+
+  const computeTaxableAmount = useCallback((order: OrderResponse): number => {
+    const items = order.items ?? []
+    const discountAmount = order.discountAmount ?? 0
+    let taxableSubtotal = 0
+    let totalSubtotal = 0
+    for (const it of items) {
+      const lineTotal = it.lineTotal ?? 0
+      totalSubtotal += lineTotal
+      const pid = it.productId
+      const pname = it.productName?.trim()
+      const pnameNorm = pname?.replace(/\s+/g, ' ')
+      const isTaxable =
+        (pid != null && productTaxMap[pid] === 'TAXABLE') ||
+        (pname && productTaxByName[pname] === 'TAXABLE') ||
+        (pnameNorm && productTaxByName[pnameNorm] === 'TAXABLE')
+      if (isTaxable) taxableSubtotal += lineTotal
+    }
+    if (totalSubtotal <= 0) return taxableSubtotal
+    const afterDiscount = Math.max(0, totalSubtotal - discountAmount)
+    return Math.round(taxableSubtotal * (afterDiscount / totalSubtotal))
+  }, [productTaxMap, productTaxByName])
+
+  const totalTaxableAmount = useMemo(() => {
+    return displayedOrders.reduce((sum, o) => sum + computeTaxableAmount(o), 0)
+  }, [displayedOrders, computeTaxableAmount])
+
   const handleIssue = async (orderId: number) => {
     setIssuingOrderId(orderId)
     try {
@@ -120,16 +177,12 @@ const CashReceiptManagement = () => {
     }
   }
 
-  const handleBulkIssueAll = () => {
-    const ids = pendingOrders.map((o) => o.orderId)
-    if (ids.length === 0) {
-      message.info('발급할 건이 없습니다.')
-      return
-    }
+  const runBulkIssue = (ids: number[]) => {
+    if (ids.length === 0) return
     Modal.confirm({
-      title: '전체 현금영수증 발급',
-      content: `미발급 ${ids.length}건을 순차적으로 발급합니다. 진행하시겠습니까?`,
-      okText: '전체 발급',
+      title: '현금영수증 발급',
+      content: `${ids.length}건을 순차적으로 발급합니다. 진행하시겠습니까?`,
+      okText: '발급',
       cancelText: '취소',
       onOk: async () => {
         bulkCancelRef.current = false
@@ -152,16 +205,35 @@ const CashReceiptManagement = () => {
 
         setBulkProgress(null)
         setIssuingOrderId(null)
+        setSelectedRowKeys([])
         if (bulkCancelRef.current) {
           message.info(`중단됨 — ${success}건 성공, ${fail}건 실패`)
         } else if (fail === 0) {
-          message.success(`${success}건 전체 발급 완료`)
+          message.success(`${success}건 발급 완료`)
         } else {
           message.warning(`${success}건 성공, ${fail}건 실패`)
         }
         refetch()
       },
     })
+  }
+
+  const handleBulkIssueSelected = () => {
+    const ids = pendingOrders.filter((o) => selectedRowKeys.includes(o.orderId)).map((o) => o.orderId)
+    if (ids.length === 0) {
+      message.info('발급할 주문을 선택해주세요.')
+      return
+    }
+    runBulkIssue(ids)
+  }
+
+  const handleBulkIssueAll = () => {
+    const ids = pendingOrders.map((o) => o.orderId)
+    if (ids.length === 0) {
+      message.info('발급할 건이 없습니다.')
+      return
+    }
+    runBulkIssue(ids)
   }
 
   const handleCancel = (orderId: number) => {
@@ -277,14 +349,18 @@ const CashReceiptManagement = () => {
       ),
     },
     {
-      title: '결제금액',
-      dataIndex: 'finalAmount',
-      key: 'finalAmount',
-      width: 110,
+      title: '과세 금액',
+      key: 'taxableAmount',
+      width: 120,
       align: 'right' as const,
-      render: (amount: number) => (
-        <Typography.Text strong style={{ color: '#1890ff' }}>{formatCurrency(amount)}</Typography.Text>
-      ),
+      render: (_: any, record: OrderResponse) => {
+        const amt = computeTaxableAmount(record)
+        return (
+          <Typography.Text strong style={{ color: amt > 0 ? '#1890ff' : '#999' }}>
+            {formatCurrency(amt)}
+          </Typography.Text>
+        )
+      },
     },
     {
       title: '결제수단',
@@ -356,13 +432,22 @@ const CashReceiptManagement = () => {
         extra={
           <Space>
             {activeTab === 'pending' && pendingOrders.length > 0 && !bulkProgress && (
-              <Button
-                type="primary"
-                icon={<ThunderboltOutlined />}
-                onClick={handleBulkIssueAll}
-              >
-                전체 발급 ({pendingOrders.length}건)
-              </Button>
+              <>
+                <Button
+                  type="primary"
+                  icon={<CheckCircleOutlined />}
+                  onClick={handleBulkIssueSelected}
+                  disabled={selectedRowKeys.length === 0}
+                >
+                  선택 발급 {selectedRowKeys.length > 0 ? `(${selectedRowKeys.length}건)` : ''}
+                </Button>
+                <Button
+                  icon={<ThunderboltOutlined />}
+                  onClick={handleBulkIssueAll}
+                >
+                  전체 발급 ({pendingOrders.length}건)
+                </Button>
+              </>
             )}
             {bulkProgress && (
               <Button
@@ -390,10 +475,17 @@ const CashReceiptManagement = () => {
           </Space>
         }
       >
+        {displayedOrders.length > 0 && (
+          <div style={{ marginBottom: 16, padding: '12px 16px', background: '#e6f7ff', borderRadius: 8, border: '1px solid #91d5ff' }}>
+            <Typography.Text strong>표시 중 과세 금액 합계: </Typography.Text>
+            <Typography.Text strong style={{ color: '#1890ff', fontSize: 16 }}>{formatCurrency(totalTaxableAmount)}</Typography.Text>
+            <Typography.Text type="secondary" style={{ marginLeft: 8 }}>({displayedOrders.length}건)</Typography.Text>
+          </div>
+        )}
         <div style={{ marginBottom: 16, display: 'flex', gap: 24 }}>
           <Tooltip title="현금영수증 신청했으나 아직 발급되지 않은 주문 (D-1)">
             <div
-              onClick={() => setActiveTab('pending')}
+              onClick={() => handleTabChange('pending')}
               style={{
                 cursor: 'pointer',
                 padding: '12px 24px',
@@ -413,7 +505,7 @@ const CashReceiptManagement = () => {
           </Tooltip>
           <Tooltip title="현금영수증 발급 완료된 주문">
             <div
-              onClick={() => setActiveTab('issued')}
+              onClick={() => handleTabChange('issued')}
               style={{
                 cursor: 'pointer',
                 padding: '12px 24px',
@@ -453,8 +545,19 @@ const CashReceiptManagement = () => {
           dataSource={displayedOrders}
           rowKey="orderId"
           loading={isLoading}
+          rowSelection={
+            activeTab === 'pending'
+              ? {
+                  selectedRowKeys,
+                  onChange: (keys) => setSelectedRowKeys(keys as React.Key[]),
+                }
+              : undefined
+          }
           onRow={(record) => ({
-            onClick: () => navigate(`/orders/${record.orderId}`),
+            onClick: (e) => {
+              if ((e.target as HTMLElement).closest('.ant-table-selection-column')) return
+              navigate(`/orders/${record.orderId}`)
+            },
             style: { cursor: 'pointer' },
           })}
           pagination={{

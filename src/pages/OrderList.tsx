@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Card, Table, Space, Typography, Tag, Button, Select, Row, Col, Modal, message, Input, Form, Tabs, DatePicker } from 'antd'
-import { ReloadOutlined, EditOutlined, DownloadOutlined } from '@ant-design/icons'
+import { Card, Table, Space, Typography, Tag, Button, Select, Row, Col, Modal, message, Input, Form, Tabs, DatePicker, Upload } from 'antd'
+import { ReloadOutlined, EditOutlined, DownloadOutlined, UploadOutlined } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import * as XLSX from 'xlsx'
 import dayjs, { Dayjs } from 'dayjs'
@@ -70,6 +70,8 @@ const OrderList = () => {
   const [cancelForm] = Form.useForm()
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
   const [isBulkStatusModalOpen, setIsBulkStatusModalOpen] = useState(false)
+  const [isTrackingBulkModalOpen, setIsTrackingBulkModalOpen] = useState(false)
+  const [trackingBulkLoading, setTrackingBulkLoading] = useState(false)
   const tableWrapperRef = useRef<HTMLDivElement>(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
   
@@ -127,7 +129,7 @@ const OrderList = () => {
   const statusFilter = getStatusFilter(activeTab)
 
   // 주문 리스트 - 불러와지는 대로 표시 (progressive loading)
-  const [ordersData, setOrdersData] = useState<{ data: (OrderResponse & { paymentMethod?: PaymentMethod })[] } | null>(null)
+  const [ordersData, setOrdersData] = useState<{ data: (OrderResponse & { paymentMethod?: PaymentMethod; customerName?: string })[] } | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [loadError, setLoadError] = useState<Error | null>(null)
   const [loadTrigger, setLoadTrigger] = useState(0)
@@ -154,13 +156,15 @@ const OrderList = () => {
           let orders: OrderResponse[] = []
           let isLastPage = true
 
-          if (response.data) {
-            if (Array.isArray(response.data)) {
-              orders = response.data
+          // 다양한 API 응답 구조 지원 (JsonBody, Page 직접 반환 등)
+          const pageData = (response as any)?.data ?? response
+          if (pageData) {
+            if (Array.isArray(pageData)) {
+              orders = pageData
               isLastPage = orders.length < fetchPageSize
-            } else if (response.data.content) {
-              orders = response.data.content
-              isLastPage = response.data.last === true || orders.length < fetchPageSize
+            } else if (pageData.content) {
+              orders = pageData.content
+              isLastPage = pageData.last === true || orders.length < fetchPageSize
             }
           }
 
@@ -177,7 +181,24 @@ const OrderList = () => {
 
         if (cancelled || allOrders.length === 0) return
 
-        // 2) 결제 정보 배치 조회 - 배치마다 화면 갱신
+        // 2) 고객명 조회 (검색용) - 고유 customerId별 프로필 배치 조회
+        const uniqueCustomerIds = [...new Set(allOrders.map((o) => o.customerId).filter(Boolean))]
+        const nameMap: Record<number, string> = {}
+        const CUSTOMER_BATCH = 20
+        for (let i = 0; i < uniqueCustomerIds.length; i += CUSTOMER_BATCH) {
+          if (cancelled) return
+          const batch = uniqueCustomerIds.slice(i, i + CUSTOMER_BATCH)
+          const results = await Promise.all(
+            batch.map((cid) =>
+              apiService.getCustomerProfile(cid).then((pr: any) => ({ cid, name: pr?.data?.customer?.name ?? pr?.customer?.name })).catch(() => ({ cid, name: undefined }))
+            )
+          )
+          results.forEach((r) => { if (r.name) nameMap[r.cid] = r.name })
+        }
+        allOrders.forEach((o) => { (o as any).customerName = nameMap[o.customerId] })
+        setOrdersData({ data: [...allOrders] })
+
+        // 3) 결제 정보 배치 조회 - 배치마다 화면 갱신
         const PAYMENT_BATCH_SIZE = 30
         for (let i = 0; i < allOrders.length; i += PAYMENT_BATCH_SIZE) {
           if (cancelled) return
@@ -189,7 +210,7 @@ const OrderList = () => {
                 const pr = await apiService.getPaymentByOrder(order.orderId)
                 if (pr?.data) paymentMethod = pr.data.method
               } catch {}
-              return { ...order, paymentMethod }
+              return { ...order, paymentMethod, customerName: (order as any).customerName }
             })
           )
           batchResults.forEach((o, idx) => { allOrders[i + idx] = o })
@@ -223,11 +244,23 @@ const OrderList = () => {
 
       // 검색 필터 (주문번호, 고객명, 전화번호)
       if (searchText && searchText.trim()) {
-        const searchLower = searchText.toLowerCase().trim()
-        const orderNoMatch = order.orderNo?.toLowerCase().includes(searchLower)
-        const nameMatch = order.recipientName?.toLowerCase().includes(searchLower)
-        const phoneMatch = order.recipientPhone?.replace(/[^0-9]/g, '').includes(searchLower.replace(/[^0-9]/g, ''))
-        
+        const search = searchText.trim()
+        const searchLower = search.toLowerCase()
+        const searchDigits = search.replace(/[^0-9]/g, '')
+
+        const orderNoMatch = (order.orderNo || '').toLowerCase().includes(searchLower)
+        const recipientNameMatch = (order.recipientName || '').toLowerCase().includes(searchLower)
+        const customerNameMatch = ((order as any).customerName || '').toLowerCase().includes(searchLower)
+        const nameMatch = recipientNameMatch || customerNameMatch
+
+        // 전화번호: 숫자만 추출, 82 국가코드 정규화 (82 10... → 010...)
+        let phoneMatch = false
+        if (searchDigits.length > 0) {
+          const phoneDigits = (order.recipientPhone || '').replace(/[^0-9]/g, '')
+          const phoneNorm = phoneDigits.startsWith('82') ? '0' + phoneDigits.slice(2) : phoneDigits
+          phoneMatch = phoneDigits.includes(searchDigits) || phoneNorm.includes(searchDigits)
+        }
+
         if (!orderNoMatch && !nameMatch && !phoneMatch) {
           return false
         }
@@ -421,20 +454,32 @@ const OrderList = () => {
     },
   })
 
-  // 바로 완료: CREATED면 결제+확인+완료, PAID/CONFIRMED면 confirm+complete
+  // 주문생성 → 결제 → 배송시작 → 배송완료 순서로 API 호출
   const completeOrderMutation = useMutation({
-    mutationFn: async ({ orderId, status }: { orderId: number; paymentMethod?: PaymentMethod; status?: OrderStatus }) => {
+    mutationFn: async ({ orderId, status, fulfillmentType, deliveryStatus }: { orderId: number; paymentMethod?: PaymentMethod; status?: OrderStatus; fulfillmentType?: FulfillmentType; deliveryStatus?: string }) => {
+      // 1) 결제 (CREATED면)
       if (status === 'CREATED') {
         const pr = await apiService.getPaymentByOrder(orderId)
         if (!pr?.data) throw new Error('결제 정보를 찾을 수 없습니다.')
         await apiService.markPaymentPaid(pr.data.paymentId, { pgPaymentKey: 'MANUAL_ADMIN' })
       }
+      // 2) 확인 (PAID → CONFIRMED)
       try {
         await apiService.confirmOrder(orderId)
       } catch {
         // 이미 CONFIRMED인 경우 무시
       }
-      await apiService.completeOrder(orderId)
+      // 3) 배송주문: 배송시작 → 배송완료 → 주문완료(COMPLETED)
+      if (fulfillmentType === 'DELIVERY') {
+        if (deliveryStatus !== 'DELIVERING') {
+          await apiService.startDelivery(orderId, { carrier: 'CJ대한통운', trackingNo: '0' })
+        }
+        await apiService.markDelivered(orderId)
+        await apiService.completeOrder(orderId)
+      } else {
+        // 4) 픽업주문: 완료
+        await apiService.completeOrder(orderId)
+      }
     },
     onSuccess: async () => {
       message.success('주문이 완료되었습니다.')
@@ -596,7 +641,7 @@ const OrderList = () => {
     onError: () => message.error('일괄 확인 처리에 실패했습니다.'),
   })
 
-  // 일괄 완료 처리 - 입금대기면 결제+확인+완료, 그 외는 confirm+complete
+  // 일괄 완료 처리 - 결제→확인→배송시작→배송완료 순서
   const bulkCompleteMutation = useMutation({
     mutationFn: async (orders: (OrderResponse & { paymentMethod?: PaymentMethod })[]) => {
       const results = []
@@ -612,7 +657,18 @@ const OrderList = () => {
           } catch {
             // 이미 CONFIRMED인 경우 무시
           }
-          await apiService.completeOrder(order.orderId)
+          if (order.fulfillmentType === 'DELIVERY') {
+            if (order.deliveryStatus !== 'DELIVERING') {
+              await apiService.startDelivery(order.orderId, {
+                carrier: order.carrier || 'CJ대한통운',
+                trackingNo: order.trackingNo?.trim() || '0',
+              })
+            }
+            await apiService.markDelivered(order.orderId)
+            await apiService.completeOrder(order.orderId)
+          } else {
+            await apiService.completeOrder(order.orderId)
+          }
           results.push({ orderId: order.orderId, success: true })
         } catch (error) {
           results.push({ orderId: order.orderId, success: false, error })
@@ -689,30 +745,110 @@ const OrderList = () => {
     },
     onError: (error: any) => {
       console.error('[OrderList] 운송장 번호 등록 에러:', error)
-      const errorMessage = error.response?.data?.message || error.response?.data?.error || `운송장 번호 등록에 실패했습니다. (${error.response?.status || '알 수 없는 오류'})`;
+      const res = error.response?.data
+      const errorMessage = res?.message || res?.error || (typeof res === 'string' ? res : JSON.stringify(res)) || `운송장 번호 등록에 실패했습니다. (${error.response?.status || '알 수 없는 오류'})`;
       message.error({
-        content: errorMessage,
-        duration: 5,
+        content: String(errorMessage).slice(0, 200),
+        duration: 8,
       });
     },
   })
 
   const handleOpenTrackingModal = (order: OrderResponse) => {
     setSelectedOrder(order)
+    const carrier = order.carrier || 'CJ대한통운'
+    const trackingNo = carrier === '직접배송' ? '0' : (order.trackingNo?.trim() || '')
     trackingForm.setFieldsValue({
-      carrier: order.carrier || 'CJ대한통운',
-      trackingNo: order.trackingNo || '',
+      carrier,
+      trackingNo,
     })
     setIsTrackingModalOpen(true)
+  }
+
+  const handleTrackingBulkExcel = async (file: File) => {
+    setTrackingBulkLoading(true)
+    try {
+      const buf = await file.arrayBuffer()
+      const wb = XLSX.read(buf, { type: 'array' })
+      const ws = wb.Sheets[wb.SheetNames[0]]
+      const data = XLSX.utils.sheet_to_json<Record<string, any>>(ws)
+      const orderNoMap = new Map<string, OrderResponse>()
+      ;(ordersData?.data || []).forEach((o) => {
+        orderNoMap.set(o.orderNo || '', o)
+        const short = o.orderNo?.split('-').pop()
+        if (short) orderNoMap.set(short, o)
+      })
+      let success = 0
+      let fail = 0
+      for (const row of data) {
+        const no = String(row['주문번호'] ?? row['orderNo'] ?? row['OrderNo'] ?? '').trim()
+        let carrier = String(row['택배사'] ?? row['carrier'] ?? 'CJ대한통운').trim() || 'CJ대한통운'
+        let tracking = String(row['운송장번호'] ?? row['trackingNo'] ?? '').trim()
+        if (carrier === '직접배송') {
+          tracking = '0'
+          carrier = 'CJ대한통운' // 직접배송: 운송장 0만 사용, 택배사는 백엔드 호환값
+        }
+        if (!no || !tracking) continue
+        const order = orderNoMap.get(no) ?? Array.from(orderNoMap.values()).find((o) => o.orderNo?.endsWith(no) || o.orderNo === no)
+        if (!order || order.fulfillmentType !== 'DELIVERY') {
+          fail++
+          continue
+        }
+        try {
+          await apiService.startDelivery(order.orderId, { carrier, trackingNo: tracking })
+          success++
+        } catch {
+          fail++
+        }
+      }
+      setTrackingBulkLoading(false)
+      setIsTrackingBulkModalOpen(false)
+      if (success > 0 || fail > 0) {
+        message.success(`운송장 등록: ${success}건 성공${fail > 0 ? `, ${fail}건 실패` : ''}`)
+        refetch()
+      } else {
+        message.warning('등록된 건이 없습니다. 엑셀 형식(주문번호, 택배사, 운송장번호)을 확인해주세요.')
+      }
+    } catch (err) {
+      setTrackingBulkLoading(false)
+      message.error('엑셀 파싱 또는 등록 중 오류가 발생했습니다.')
+    }
+  }
+
+  const [directDeliveryOrderId, setDirectDeliveryOrderId] = useState<number | null>(null)
+  const handleDirectDeliveryComplete = async (order: OrderResponse) => {
+    setDirectDeliveryOrderId(order.orderId)
+    try {
+      const trackingNo = (order.trackingNo?.trim() || '0')
+      await apiService.startDelivery(order.orderId, {
+        carrier: order.carrier || 'CJ대한통운',
+        trackingNo,
+      })
+      await apiService.markDelivered(order.orderId)
+      await apiService.completeOrder(order.orderId)
+      message.success(`주문 ${order.orderNo} 직접배송 완료 처리되었습니다.`)
+      refetch()
+      queryClient.invalidateQueries({ queryKey: ['order'] })
+    } catch (err: any) {
+      message.error(err.response?.data?.message || '직접배송 완료 처리에 실패했습니다.')
+    } finally {
+      setDirectDeliveryOrderId(null)
+    }
   }
 
   const handleTrackingModalOk = () => {
     trackingForm.validateFields().then((values) => {
       if (selectedOrder) {
+        let carrier = values.carrier || 'CJ대한통운'
+        let trackingNo = values.trackingNo?.trim() || '0'
+        if (carrier === '직접배송') {
+          carrier = 'CJ대한통운'
+          trackingNo = '0'
+        }
         startDeliveryMutation.mutate({
           orderId: selectedOrder.orderId,
-          carrier: values.carrier || 'CJ대한통운',
-          trackingNo: values.trackingNo.trim(),
+          carrier,
+          trackingNo,
         })
       }
     })
@@ -743,15 +879,18 @@ const OrderList = () => {
 
   const handleCompleteOrder = (record: OrderResponse & { paymentMethod?: PaymentMethod }) => {
     const isCreated = record.status === 'CREATED'
+    const isDelivery = record.fulfillmentType === 'DELIVERY'
     Modal.confirm({
       title: '주문 완료',
       content: isCreated
-        ? '이 주문을 결제+확인+완료 처리하시겠습니까? (입금대기 → 완료)'
-        : '이 주문을 완료 처리하시겠습니까? (PAID/CONFIRMED → COMPLETED)',
+        ? `이 주문을 결제→확인→${isDelivery ? '배송시작→배송완료' : '완료'} 처리하시겠습니까?`
+        : `이 주문을 ${isDelivery ? '확인→배송시작→배송완료' : '완료'} 처리하시겠습니까?`,
       onOk: () => completeOrderMutation.mutate({
         orderId: record.orderId,
         paymentMethod: record.paymentMethod || 'BANK_TRANSFER',
         status: record.status,
+        fulfillmentType: record.fulfillmentType,
+        deliveryStatus: record.deliveryStatus,
       }),
     })
   }
@@ -932,26 +1071,45 @@ const OrderList = () => {
   const generateExcel = async (orders: OrderResponse[], filePrefix: string) => {
     try {
       message.loading({ content: '상품 정보 조회 중...', key: 'excel-products' })
+
+      // 결제수단 미로드 주문 보강 (2페이지 이후 할인 적용을 위해)
+      const ordersNeedingPayment = orders.filter((o) => !(o as any).paymentMethod)
+      if (ordersNeedingPayment.length > 0) {
+        const PAYMENT_BATCH = 30
+        for (let i = 0; i < ordersNeedingPayment.length; i += PAYMENT_BATCH) {
+          const batch = ordersNeedingPayment.slice(i, i + PAYMENT_BATCH)
+          const results = await Promise.all(
+            batch.map((o) =>
+              apiService.getPaymentByOrder(o.orderId).then((pr) => ({ orderId: o.orderId, method: pr?.data?.method })).catch(() => ({ orderId: o.orderId, method: undefined }))
+            )
+          )
+          results.forEach((r) => {
+            const order = orders.find((o) => o.orderId === r.orderId)
+            if (order && r.method) (order as any).paymentMethod = r.method
+          })
+        }
+      }
+
       const [productsResponse, discountPoliciesResponse] = await Promise.all([
         apiService.getProducts(),
         apiService.getDiscountPolicies(),
       ])
-      
-      const allProducts = productsResponse.data
-      const activePolicy = discountPoliciesResponse.data?.find((p: any) => p.active)
+      const allProducts = Array.isArray(productsResponse?.data) ? productsResponse.data : Array.isArray(productsResponse) ? productsResponse : []
+      const activeProducts = allProducts.filter((p: any) => !p.deletedAt)
+
+      const activePolicy = discountPoliciesResponse?.data?.find((p: any) => p.active)
       const discountRules = activePolicy?.rules || []
-      
-      const getPickupDiscountRule = (productId: number) =>
-        discountRules.find(
-          (r: any) => r.targetProductId === productId && r.active && r.applyScope === 'PICKUP'
-        )
-      const calcPickupPrice = (unitPrice: number, quantity: number, rule: any): number => {
-        if (!rule) return unitPrice * quantity
-        if (rule.amountOff != null) return Math.max(0, (unitPrice - rule.amountOff) * quantity)
-        if (rule.discountRate != null) return Math.floor(unitPrice * (1 - rule.discountRate / 100) * quantity)
-        return unitPrice * quantity
+      const getPickupDiscountRule = (pid: number) =>
+        discountRules.find((r: any) => r.targetProductId === pid && r.active && r.applyScope === 'PICKUP')
+      const getBankTransferRule = (pid: number) =>
+        discountRules.find((r: any) => r.targetProductId === pid && r.active && (r.type === 'BANK_TRANSFER_FIXED' || r.type === 'BANK_TRANSFER_RATE'))
+      const getQtyRule = (pid: number, qty: number) =>
+        discountRules.find((r: any) => r.targetProductId === pid && r.active && (r.type === 'QTY_FIXED' || r.type === 'QTY_RATE') && (r.minQty == null || qty >= r.minQty))
+      // 개당 할인: amountOff만 사용 (단가 - amountOff) × 수량
+      const calcDiscountedPrice = (unitPrice: number, quantity: number, rule: any): number => {
+        if (!rule || rule.amountOff == null) return unitPrice * quantity
+        return Math.max(0, (unitPrice - rule.amountOff) * quantity)
       }
-      const activeProducts = allProducts.filter(p => !p.deletedAt)
 
       // 활성 상품 이름 → 매입가 (최신 매입가, 삭제→재생성 후 새 상품 반영)
       const activePriceByName = new Map<string, number>()
@@ -1017,10 +1175,31 @@ const OrderList = () => {
           const quantity = item.quantity || 0
           const unitPrice = item.unitPrice || 0
           const lineTotal = item.lineTotal ?? unitPrice * quantity
-          const itemSalesPrice =
-            order.fulfillmentType === 'PICKUP' && productId
-              ? calcPickupPrice(unitPrice, quantity, getPickupDiscountRule(productId))
-              : lineTotal
+          let itemSalesPrice = lineTotal
+          // 할인 정책 적용: 픽업→픽업할인, 무통장→무통장할인, 수량→수량할인 (개당 할인)
+          if (productId) {
+            if (order.fulfillmentType === 'PICKUP') {
+              const r = getPickupDiscountRule(productId)
+              if (r) itemSalesPrice = calcDiscountedPrice(unitPrice, quantity, r)
+            }
+            if (order.paymentMethod === 'BANK_TRANSFER') {
+              const r = getBankTransferRule(productId)
+              if (r) {
+                const p = calcDiscountedPrice(unitPrice, quantity, r)
+                itemSalesPrice = Math.min(itemSalesPrice, p)
+              }
+            }
+            const qr = getQtyRule(productId, quantity)
+            if (qr) {
+              const qp = calcDiscountedPrice(unitPrice, quantity, qr)
+              itemSalesPrice = Math.min(itemSalesPrice, qp)
+            }
+          }
+          // 할인금액은 첫 번째 상품에만 적용 (전체 배분 X)
+          const orderDiscountAmt = order.discountAmount || 0
+          if (itemIndex === 0 && orderDiscountAmt > 0) {
+            itemSalesPrice = Math.max(0, itemSalesPrice - orderDiscountAmt)
+          }
           const itemPurchasePrice = purchasePriceUnit * quantity
           const orderDiscount = itemIndex === 0 ? (order.discountAmount || 0) : ''
           const orderFinalAmount = itemIndex === 0 ? (order.finalAmount || 0) : ''
@@ -1424,23 +1603,32 @@ const OrderList = () => {
         onResize: handleResize('trackingNo'),
       }),
       render: (trackingNo: string | undefined, record: OrderResponse) => {
-        // 배송 주문인 경우에만 운송장 번호 입력 가능
         if (record.fulfillmentType === 'DELIVERY') {
           return (
-            <Space>
-              {trackingNo ? (
-                <Tag color="blue">{trackingNo}</Tag>
-              ) : (
-                <Tag color="default">미입력</Tag>
-              )}
-              <Button
-                type="link"
-                size="small"
-                icon={<EditOutlined />}
-                onClick={(e) => { e.stopPropagation(); handleOpenTrackingModal(record); }}
-              >
-                {trackingNo ? '수정' : '입력'}
-              </Button>
+            <Space direction="vertical" size={4}>
+              <Space wrap>
+                {trackingNo ? (
+                  <Tag color="blue">{trackingNo}</Tag>
+                ) : (
+                  <Tag color="default">미입력</Tag>
+                )}
+                <Button
+                  type="link"
+                  size="small"
+                  icon={<EditOutlined />}
+                  onClick={(e) => { e.stopPropagation(); handleOpenTrackingModal(record); }}
+                >
+                  {trackingNo ? '수정' : '입력'}
+                </Button>
+                <Button
+                  type="link"
+                  size="small"
+                  loading={directDeliveryOrderId === record.orderId}
+                  onClick={(e) => { e.stopPropagation(); handleDirectDeliveryComplete(record); }}
+                >
+                  직접 완료
+                </Button>
+              </Space>
             </Space>
           )
         }
@@ -1521,16 +1709,16 @@ const OrderList = () => {
                 />
               )}
             </div>
-            <Input.Search
-              placeholder="주문번호, 고객명, 전화번호"
+            <Input
+              placeholder="주문번호 / 고객명 / 전화번호 검색"
               allowClear
               value={searchText}
               onChange={(e) => {
                 setSearchText(e.target.value)
                 setCurrentPage(1)
               }}
-              onSearch={(value) => {
-                setSearchText(value)
+              onPressEnter={(e) => {
+                setSearchText((e.target as HTMLInputElement).value)
                 setCurrentPage(1)
               }}
               style={{ width: 280 }}
@@ -1561,6 +1749,13 @@ const OrderList = () => {
               type="default"
             >
               전체 엑셀 다운로드 ({filteredOrders.length}건)
+            </Button>
+            <Button
+              icon={<UploadOutlined />}
+              onClick={() => setIsTrackingBulkModalOpen(true)}
+              type="default"
+            >
+              운송장 엑셀 일괄등록
             </Button>
             {selectedRowKeys.length > 0 && (
               <>
@@ -1887,6 +2082,30 @@ const OrderList = () => {
         </div>
       </Card>
 
+      {/* 운송장 엑셀 일괄등록 모달 */}
+      <Modal
+        title="운송장 번호 엑셀 일괄등록"
+        open={isTrackingBulkModalOpen}
+        onCancel={() => setIsTrackingBulkModalOpen(false)}
+        footer={null}
+      >
+        <Typography.Paragraph type="secondary" style={{ marginBottom: 16 }}>
+          엑셀 파일 형식: <strong>주문번호</strong>, <strong>택배사</strong>, <strong>운송장번호</strong> 컬럼 필요. 직접배송은 택배사에 "직접배송" 입력 시 운송장 0 자동 적용.
+        </Typography.Paragraph>
+        <Upload
+          accept=".xlsx,.xls"
+          showUploadList={false}
+          beforeUpload={(file) => {
+            handleTrackingBulkExcel(file)
+            return false
+          }}
+        >
+          <Button icon={<UploadOutlined />} loading={trackingBulkLoading}>
+            엑셀 파일 선택
+          </Button>
+        </Upload>
+      </Modal>
+
       {/* 운송장 번호 입력 모달 */}
       <Modal
         title="운송장 번호 입력"
@@ -1899,7 +2118,15 @@ const OrderList = () => {
         }}
         confirmLoading={startDeliveryMutation.isPending}
       >
-        <Form form={trackingForm} layout="vertical">
+        <Form
+          form={trackingForm}
+          layout="vertical"
+          onValuesChange={(changed) => {
+            if (changed.carrier === '직접배송') {
+              trackingForm.setFieldsValue({ trackingNo: '0' })
+            }
+          }}
+        >
           <Form.Item
             label="택배사"
             name="carrier"
@@ -1913,17 +2140,19 @@ const OrderList = () => {
               { value: '롯데택배', label: '롯데택배' },
               { value: '대신택배', label: '대신택배' },
               { value: '일양로지스', label: '일양로지스' },
+              { value: '직접배송', label: '직접배송' },
             ]} />
           </Form.Item>
           <Form.Item
             label="운송장 번호"
             name="trackingNo"
             rules={[
-              { required: true, message: '운송장 번호를 입력해주세요.' },
-              { min: 1, message: '운송장 번호를 입력해주세요.' },
+              { required: true, message: '운송장 번호를 입력해주세요. (직접배송은 0)' },
+              { whitespace: true, message: '공백만 입력할 수 없습니다.' },
             ]}
+            dependencies={['carrier']}
           >
-            <Input placeholder="운송장 번호를 입력하세요" />
+            <Input placeholder="직접배송은 0, 그 외 실제 운송장 번호 입력 (필수)" />
           </Form.Item>
           {selectedOrder && (
             <div style={{ marginTop: 16, padding: 12, backgroundColor: '#f5f5f5', borderRadius: 4 }}>

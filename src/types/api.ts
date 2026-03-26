@@ -605,8 +605,8 @@ export interface PageStockHistory {
 
 // Order Delivery types
 export interface OrderDeliveryStartRequest {
-  carrier: string; // 택배사
-  trackingNo?: string; // 운송장 번호
+  carrier: string;  // 택배사 (필수)
+  trackingNo: string; // 운송장 번호 (필수, 직접배송 시 '0')
 }
 
 export interface OrderCancelRequest {

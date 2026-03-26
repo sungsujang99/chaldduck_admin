@@ -273,7 +273,7 @@ class ApiService {
     return response.data;
   }
 
-  async getAllOrdersAdmin(params?: { page?: number; size?: number }): Promise<JsonBody<PageOrderResponse>> {
+  async getAllOrdersAdmin(params?: { page?: number; size?: number; search?: string }): Promise<JsonBody<PageOrderResponse>> {
     const response = await this.client.get('/api/v1/admin/orders', { params });
     return response.data;
   }
@@ -461,12 +461,15 @@ class ApiService {
     return response.data;
   }
 
+  /** POST /api/v1/orders/{orderId}/delivery/start - carrier, trackingNo 필수 */
   async startDelivery(
     orderId: number,
     data: OrderDeliveryStartRequest
   ): Promise<JsonBody<void>> {
-    const response = await this.client.post(`/api/v1/orders/${orderId}/delivery/start`, data);
-    return response.data;
+    const trackingNo = (data.trackingNo?.trim() || '0')
+    const payload = { carrier: data.carrier, trackingNo }
+    const response = await this.client.post(`/api/v1/orders/${orderId}/delivery/start`, payload)
+    return response.data
   }
 
   async markDelivered(orderId: number): Promise<JsonBody<void>> {

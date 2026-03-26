@@ -579,7 +579,14 @@ const Dashboard = () => {
           }
           
           const quantity = item.quantity || 0
-          const itemSalesPrice = item.lineTotal ?? (item.unitPrice || 0) * quantity
+          const lineTotal = item.lineTotal ?? (item.unitPrice || 0) * quantity
+          let itemSalesPrice = lineTotal
+          // 주문 전체 할인금액을 매출가에 반영 (비율 배분)
+          const orderSubtotal = order.subtotalAmount ?? items.reduce((s: number, i: OrderItemResponse) => s + (i.lineTotal ?? (i.unitPrice || 0) * (i.quantity || 0)), 0)
+          const orderDiscountAmt = order.discountAmount || 0
+          if (orderSubtotal > 0 && orderDiscountAmt > 0) {
+            itemSalesPrice = Math.round(lineTotal * (orderSubtotal - orderDiscountAmt) / orderSubtotal)
+          }
           const salesUnitPrice = quantity > 0 ? Math.round(itemSalesPrice / quantity) : (item.unitPrice || 0)
           const itemPurchasePrice = purchasePriceUnit * quantity
 
@@ -1229,6 +1236,9 @@ const Dashboard = () => {
         </Space>
       </Card>
 
+      <div style={{ textAlign: 'center', padding: '24px 0 16px', color: '#999', fontSize: 12 }}>
+        v{__APP_VERSION__ ?? '1.0.0'}
+      </div>
     </div>
   )
 }

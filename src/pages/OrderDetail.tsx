@@ -156,18 +156,38 @@ const OrderDetail = () => {
     },
   })
 
-  // 주문 완료 처리 (CONFIRMED → COMPLETED)
+  // 주문 완료 처리 - 결제→확인→배송시작→배송완료 순서
   const completeOrderMutation = useMutation({
     mutationFn: async () => {
-      // CONFIRMED 상태에서만 COMPLETED로 변경 가능
       const orderResponse = await apiService.getOrder(Number(orderId))
-      const currentStatus = orderResponse.data.status
-      
-      if (currentStatus === 'CONFIRMED') {
-        // CONFIRMED → COMPLETED
+      const order = orderResponse.data
+      const currentStatus = order.status
+      const fulfillmentType = order.fulfillmentType
+
+      // 1) CREATED면 결제
+      if (currentStatus === 'CREATED') {
+        const pr = await apiService.getPaymentByOrder(Number(orderId))
+        if (!pr?.data) throw new Error('결제 정보를 찾을 수 없습니다.')
+        await apiService.markPaymentPaid(pr.data.paymentId, { pgPaymentKey: 'MANUAL_ADMIN' })
+      }
+      // 2) 확인
+      try {
+        await apiService.confirmOrder(Number(orderId))
+      } catch {
+        // 이미 CONFIRMED인 경우 무시
+      }
+      // 3) 배송주문: 배송시작→배송완료→주문완료(COMPLETED) / 픽업: 완료
+      if (fulfillmentType === 'DELIVERY') {
+        if (order.deliveryStatus !== 'DELIVERING') {
+          await apiService.startDelivery(Number(orderId), {
+            carrier: order.carrier || 'CJ대한통운',
+            trackingNo: order.trackingNo?.trim() || '0',
+          })
+        }
+        await apiService.markDelivered(Number(orderId))
         await apiService.completeOrder(Number(orderId))
       } else {
-        throw new Error(`주문 상태가 올바르지 않습니다. (현재 상태: ${currentStatus}, 예상: CONFIRMED)`)
+        await apiService.completeOrder(Number(orderId))
       }
     },
     onSuccess: () => {
@@ -352,14 +372,22 @@ const OrderDetail = () => {
   }
 
   const handleTrackingSubmit = (values: { carrier: string; trackingNumber: string }) => {
+    let carrier = values.carrier || 'CJ대한통운'
+    let trackingNo = values.trackingNumber?.trim() || '0'
+    if (carrier === '직접배송') {
+      carrier = 'CJ대한통운'
+      trackingNo = '0'
+    }
     updateTrackingNumberMutation.mutate({
-      carrier: values.carrier || 'CJ대한통운',
-      trackingNo: values.trackingNumber.trim(),
+      carrier,
+      trackingNo,
     })
   }
 
   const handleOpenTrackingModal = () => {
-    trackingForm.setFieldsValue({ carrier: order?.carrier || 'CJ대한통운', trackingNumber: order?.trackingNo || '' })
+    const carrier = order?.carrier || 'CJ대한통운'
+    const trackingNumber = carrier === '직접배송' ? '0' : (order?.trackingNo?.trim() || '')
+    trackingForm.setFieldsValue({ carrier, trackingNumber })
     setIsTrackingModalOpen(true)
   }
 
@@ -478,18 +506,44 @@ const OrderDetail = () => {
           )}
           {order.fulfillmentType === 'DELIVERY' && (
             <Descriptions.Item label="운송장번호">
-              {order.trackingNo ? (
-                <Space>
-                  <span>{order.trackingNo}</span>
-                  <Button type="link" size="small" onClick={handleOpenTrackingModal}>
-                    수정
-                  </Button>
-                </Space>
-              ) : (
-                <Button type="link" size="small" onClick={handleOpenTrackingModal}>
-                  입력하기
-                </Button>
-              )}
+              <Space wrap>
+                {order.trackingNo ? (
+                  <>
+                    <span>{order.trackingNo}</span>
+                    <Button type="link" size="small" onClick={handleOpenTrackingModal}>
+                      수정
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <Button type="link" size="small" onClick={handleOpenTrackingModal}>
+                      수기 입력
+                    </Button>
+                    <Button
+                      type="link"
+                      size="small"
+                      onClick={async () => {
+                        try {
+                          const trackingNo = (order.trackingNo?.trim() || '0')
+                          await apiService.startDelivery(Number(orderId), {
+                            carrier: order.carrier || 'CJ대한통운',
+                            trackingNo,
+                          })
+                          await apiService.markDelivered(Number(orderId))
+                          await apiService.completeOrder(Number(orderId))
+                          message.success('직접배송 완료 처리되었습니다.')
+                          queryClient.invalidateQueries({ queryKey: ['order', orderId] })
+                          refetchOrder()
+                        } catch (err: any) {
+                          message.error(err.response?.data?.message || '직접배송 완료 처리에 실패했습니다.')
+                        }
+                      }}
+                    >
+                      직접 완료
+                    </Button>
+                  </>
+                )}
+              </Space>
             </Descriptions.Item>
           )}
           {order.deliveryStatus && (
@@ -634,7 +688,16 @@ const OrderDetail = () => {
         }}
         confirmLoading={updateTrackingNumberMutation.isPending}
       >
-        <Form form={trackingForm} layout="vertical" onFinish={handleTrackingSubmit}>
+        <Form
+          form={trackingForm}
+          layout="vertical"
+          onFinish={handleTrackingSubmit}
+          onValuesChange={(changed) => {
+            if (changed.carrier === '직접배송') {
+              trackingForm.setFieldsValue({ trackingNumber: '0' })
+            }
+          }}
+        >
           <Form.Item
             label="택배사"
             name="carrier"
@@ -648,14 +711,18 @@ const OrderDetail = () => {
               { value: '롯데택배', label: '롯데택배' },
               { value: '대신택배', label: '대신택배' },
               { value: '일양로지스', label: '일양로지스' },
+              { value: '직접배송', label: '직접배송' },
             ]} />
           </Form.Item>
           <Form.Item
             label="운송장번호"
             name="trackingNumber"
-            rules={[{ required: true, message: '운송장번호를 입력해주세요.' }]}
+            rules={[
+              { required: true, message: '운송장번호를 입력해주세요. (직접배송은 0)' },
+              { whitespace: true, message: '공백만 입력할 수 없습니다.' },
+            ]}
           >
-            <Input placeholder="운송장번호를 입력하세요" />
+            <Input placeholder="직접배송은 0, 그 외 실제 운송장번호 입력 (필수)" />
           </Form.Item>
         </Form>
       </Modal>

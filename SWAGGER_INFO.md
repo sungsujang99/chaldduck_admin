@@ -45,7 +45,9 @@
 - `GET /api/v1/admin/orders` - includeDeleted 파라미터로 삭제된 주문 포함 조회
 
 ### 7. 배송 정보
-- `OrderDeliveryStartRequest`에 `carrier` 필드 필수 (택배사)
+- `POST /api/v1/orders/{orderId}/delivery/start` - 배송 시작 + 택배사/운송장 저장
+- `OrderDeliveryStartRequest`: `carrier`(택배사), `trackingNo`(운송장) **둘 다 필수**
+- 직접배송 시: carrier=CJ대한통운, trackingNo=0 권장
 - `OrderResponse`에 `carrier`, `trackingNo` 필드 포함
 
 ### 7. 배송비 규칙
