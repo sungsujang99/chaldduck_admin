@@ -1714,6 +1714,20 @@ const OrderList = () => {
     ? columns.filter((column) => column.key !== 'mobileOrderSummary')
     : columns
 
+  const mobileCardBodyStyle = screens.md ? undefined : { padding: 10 }
+  const mobileTableCardBodyStyle = screens.md ? undefined : { padding: 8 }
+  const statsHeadCellStyle = {
+    padding: screens.md ? '12px 8px' : '10px 4px',
+    fontWeight: 600,
+    fontSize: screens.md ? 14 : 12,
+  }
+  const statsValueCellStyle = {
+    padding: screens.md ? '16px 8px' : '12px 4px',
+    fontSize: screens.md ? 20 : 16,
+    fontWeight: 700,
+    cursor: 'pointer' as const,
+  }
+
   const topActionButtonStyle = screens.md ? undefined : { width: '100%' }
   const topActionButtons = (
     <Space
@@ -1901,6 +1915,7 @@ const OrderList = () => {
         }
         style={{ marginBottom: 24 }}
         styles={{
+          body: mobileCardBodyStyle,
           header: {
             borderBottom: '2px solid #000',
           }
@@ -1992,46 +2007,46 @@ const OrderList = () => {
         ) : null}
       >
         {!screens.md && (
-          <div style={{ marginBottom: 16 }}>
+          <div style={{ marginBottom: 12 }}>
             {topActionButtons}
           </div>
         )}
-        <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'center' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'center', tableLayout: 'fixed' }}>
           <thead>
             <tr style={{ borderBottom: '1px solid #d9d9d9' }}>
               <th style={{ padding: '12px 8px', fontWeight: 600, fontSize: 14 }}>총 주문</th>
               <th 
-                style={{ padding: '12px 8px', fontWeight: 600, fontSize: 14, cursor: 'pointer', color: '#1890ff' }}
+                style={{ ...statsHeadCellStyle, cursor: 'pointer', color: '#1890ff' }}
                 onClick={() => setActiveTab('CREATED')}
               >
                 입금대기
               </th>
               <th 
-                style={{ padding: '12px 8px', fontWeight: 600, fontSize: 14, cursor: 'pointer', color: '#722ed1' }}
+                style={{ ...statsHeadCellStyle, cursor: 'pointer', color: '#722ed1' }}
                 onClick={() => setActiveTab('PICKUP_WAITING')}
               >
                 픽업대기
               </th>
               <th 
-                style={{ padding: '12px 8px', fontWeight: 600, fontSize: 14, cursor: 'pointer', color: '#13c2c2' }}
+                style={{ ...statsHeadCellStyle, cursor: 'pointer', color: '#13c2c2' }}
                 onClick={() => setActiveTab('DELIVERY_READY')}
               >
                 배송준비
               </th>
               <th 
-                style={{ padding: '12px 8px', fontWeight: 600, fontSize: 14, cursor: 'pointer', color: '#fa8c16' }}
+                style={{ ...statsHeadCellStyle, cursor: 'pointer', color: '#fa8c16' }}
                 onClick={() => setActiveTab('DELIVERY')}
               >
                 배송중
               </th>
               <th 
-                style={{ padding: '12px 8px', fontWeight: 600, fontSize: 14, cursor: 'pointer', color: '#52c41a' }}
+                style={{ ...statsHeadCellStyle, cursor: 'pointer', color: '#52c41a' }}
                 onClick={() => setActiveTab('COMPLETED')}
               >
                 완료
               </th>
               <th 
-                style={{ padding: '12px 8px', fontWeight: 600, fontSize: 14, cursor: 'pointer', color: '#ff4d4f' }}
+                style={{ ...statsHeadCellStyle, cursor: 'pointer', color: '#ff4d4f' }}
                 onClick={() => setActiveTab('CANCELED')}
               >
                 취소
@@ -2041,43 +2056,43 @@ const OrderList = () => {
           <tbody>
             <tr>
               <td 
-                style={{ padding: '16px 8px', fontSize: 20, fontWeight: 700, cursor: 'pointer' }}
+                style={statsValueCellStyle}
                 onClick={() => setActiveTab('ALL')}
               >
                 {orderStats.total}
               </td>
               <td 
-                style={{ padding: '16px 8px', fontSize: 20, fontWeight: 700, cursor: 'pointer', color: '#1890ff' }}
+                style={{ ...statsValueCellStyle, color: '#1890ff' }}
                 onClick={() => setActiveTab('CREATED')}
               >
                 {orderStats.waitingPayment}
               </td>
               <td 
-                style={{ padding: '16px 8px', fontSize: 20, fontWeight: 700, cursor: 'pointer', color: '#722ed1' }}
+                style={{ ...statsValueCellStyle, color: '#722ed1' }}
                 onClick={() => setActiveTab('PICKUP_WAITING')}
               >
                 {orderStats.pickupWaiting}
               </td>
               <td 
-                style={{ padding: '16px 8px', fontSize: 20, fontWeight: 700, cursor: 'pointer', color: '#13c2c2' }}
+                style={{ ...statsValueCellStyle, color: '#13c2c2' }}
                 onClick={() => setActiveTab('DELIVERY_READY')}
               >
                 {orderStats.deliveryReady}
               </td>
               <td 
-                style={{ padding: '16px 8px', fontSize: 20, fontWeight: 700, cursor: 'pointer', color: '#fa8c16' }}
+                style={{ ...statsValueCellStyle, color: '#fa8c16' }}
                 onClick={() => setActiveTab('DELIVERY')}
               >
                 {orderStats.delivering}
               </td>
               <td 
-                style={{ padding: '16px 8px', fontSize: 20, fontWeight: 700, cursor: 'pointer', color: '#52c41a' }}
+                style={{ ...statsValueCellStyle, color: '#52c41a' }}
                 onClick={() => setActiveTab('COMPLETED')}
               >
                 {orderStats.completed}
               </td>
               <td 
-                style={{ padding: '16px 8px', fontSize: 20, fontWeight: 700, cursor: 'pointer', color: '#ff4d4f' }}
+                style={{ ...statsValueCellStyle, color: '#ff4d4f' }}
                 onClick={() => setActiveTab('CANCELED')}
               >
                 {orderStats.canceled}
@@ -2088,7 +2103,7 @@ const OrderList = () => {
       </Card>
       
       {/* 필터 섹션 */}
-      <Card style={{ marginBottom: 24 }}>
+      <Card style={{ marginBottom: 24 }} styles={{ body: mobileCardBodyStyle }}>
         <Row gutter={[16, 16]}>
           <Col xs={24} sm={12} md={8}>
             <Space direction="vertical" size={4} style={{ width: '100%' }}>
@@ -2192,13 +2207,13 @@ const OrderList = () => {
           </Space>
         </Card>
       )}
-      <Card>
+      <Card styles={{ body: mobileTableCardBodyStyle }}>
         {/* 상단 스크롤바 */}
         <div 
           style={{ 
             overflowX: 'auto', 
             overflowY: 'hidden',
-            marginBottom: 8,
+            marginBottom: screens.md ? 8 : 4,
           }}
           onScroll={(e) => {
             if (tableWrapperRef.current) {

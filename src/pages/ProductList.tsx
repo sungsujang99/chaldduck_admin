@@ -18,6 +18,7 @@ import {
   Select,
   Collapse,
   Checkbox,
+  Grid,
 } from 'antd'
 import type { CheckboxChangeEvent } from 'antd/es/checkbox'
 import { PlusOutlined, ReloadOutlined, DeleteOutlined, GiftOutlined, ExclamationCircleOutlined, OrderedListOutlined, HolderOutlined } from '@ant-design/icons'
@@ -279,6 +280,7 @@ const ProductList = () => {
   const [discountRuleForm] = Form.useForm()
   const [editProductForm] = Form.useForm()
   const queryClient = useQueryClient()
+  const screens = Grid.useBreakpoint()
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [isStockModalOpen, setIsStockModalOpen] = useState(false)
   const [isDiscountPolicyModalOpen, setIsDiscountPolicyModalOpen] = useState(false)
@@ -290,6 +292,7 @@ const ProductList = () => {
   const [_addingRuleProductId, setAddingRuleProductId] = useState<number | null>(null)
   const [editingCell, setEditingCell] = useState<{ productId: number; field: string } | null>(null)
   const [editingValue, setEditingValue] = useState<string>('')
+  const savingCellKeysRef = useRef<Set<string>>(new Set())
   const [isOrderModalOpen, setIsOrderModalOpen] = useState(false)
   const [selectedProductForOrder, setSelectedProductForOrder] = useState<AdminProductStockRow | null>(null)
   const [orderForm] = Form.useForm()
@@ -466,10 +469,16 @@ const ProductList = () => {
 
   // 상품 삭제 (soft delete)
   const deleteProductMutation = useMutation({
-    mutationFn: (productId: number) => apiService.deleteProduct(productId),
+    mutationFn: async (productId: number) => {
+      await deleteProductDiscountRules(productId)
+      await apiService.deleteProduct(productId)
+      await waitForProductDeletion(productId)
+    },
     onSuccess: () => {
       message.success('상품이 삭제되었습니다.')
+      queryClient.invalidateQueries({ queryKey: ['discountPolicies'] })
       queryClient.invalidateQueries({ queryKey: ['products'] })
+      refetchDiscountPolicies()
       refetch()
     },
     onError: (error: any) => {
@@ -1092,20 +1101,236 @@ const ProductList = () => {
     setEditingValue(String(currentValue))
   }
 
-  // 셀 편집 저장
-  const handleCellSave = async (productId: number, field: string) => {
-    console.log('[handleCellSave] 호출됨:', { productId, field, editingValue })
-    
-    const product = activeProducts.find(p => p.productId === productId)
-    if (!product) {
-      console.log('[handleCellSave] 상품을 찾을 수 없음:', productId)
+  const extractProductRows = (response: any): AdminProductStockRow[] => {
+    if (Array.isArray(response?.data)) return response.data
+    if (Array.isArray(response)) return response
+    return []
+  }
+
+  const fetchLatestProducts = async () => {
+    const latestResponse = await apiService.getProducts()
+    queryClient.setQueryData(['products'], latestResponse)
+    return extractProductRows(latestResponse)
+  }
+
+  const extractDiscountPolicies = (response: any): DiscountPolicyResponse[] => {
+    if (Array.isArray(response?.data)) return response.data
+    if (Array.isArray(response)) return response
+    return []
+  }
+
+  const fetchLatestDiscountPolicies = async () => {
+    const latestResponse = await apiService.getDiscountPolicies()
+    queryClient.setQueryData(['discountPolicies'], latestResponse)
+    return extractDiscountPolicies(latestResponse)
+  }
+
+  const getDiscountRulesForProduct = (productId: number) => {
+    const policies = discountPoliciesData?.data || []
+    return policies.flatMap((policy) =>
+      (policy.rules || [])
+        .filter((rule) => rule.targetProductId === productId)
+        .map((rule) => ({ ...rule, policyId: policy.id }))
+    )
+  }
+
+  const waitForDiscountRuleDeletion = async (productId: number, maxAttempts = 10, delayMs = 400) => {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const latestPolicies = await fetchLatestDiscountPolicies()
+      const remainingRules = latestPolicies.flatMap((policy) =>
+        (policy.rules || []).filter((rule) => rule.targetProductId === productId)
+      )
+
+      if (remainingRules.length === 0) {
+        return latestPolicies
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+    }
+
+    throw new Error('상품에 연결된 할인룰 삭제 반영을 확인하지 못했습니다.')
+  }
+
+  const deleteProductDiscountRules = async (productId: number) => {
+    const rulesToDelete = getDiscountRulesForProduct(productId)
+    if (rulesToDelete.length === 0) return
+
+    message.loading({ content: '할인룰 삭제 중...', key: 'purchasePrice' })
+
+    for (const rule of rulesToDelete) {
+      await apiService.deleteDiscountRule(rule.id)
+    }
+
+    await waitForDiscountRuleDeletion(productId)
+  }
+
+  const waitForProductDeletion = async (productId: number, maxAttempts = 12, delayMs = 500) => {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const latestProducts = await fetchLatestProducts()
+      const existingProduct = latestProducts.find(product => product.productId === productId)
+
+      if (!existingProduct || existingProduct.deletedAt) {
+        return latestProducts
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+    }
+
+    throw new Error('기존 상품 삭제 반영을 확인하지 못했습니다.')
+  }
+
+  const handlePurchasePriceUpdate = async (productId: number, nextPurchasePrice: number) => {
+    const currentProduct = products?.find(p => p.productId === productId)
+    if (!currentProduct) {
+      message.error('상품을 찾을 수 없습니다.')
       return
     }
 
-    const numValue = Number(editingValue)
-    console.log('[handleCellSave] numValue:', numValue)
+    if (currentProduct.purchasePrice === nextPurchasePrice) {
+      setEditingCell(null)
+      setEditingValue('')
+      return
+    }
 
-    if (field === 'bankTransferPrice') {
+    const productDiscountRules = getDiscountRulesForProduct(productId)
+    const existingRules = productDiscountRules.map(rule => ({
+      policyId: rule.policyId,
+      label: rule.label,
+      type: rule.type,
+      applyScope: rule.applyScope,
+      discountRate: rule.discountRate ?? 0,
+      amountOff: rule.amountOff ?? 0,
+      minAmount: rule.minAmount ?? 0,
+      minQty: rule.minQty ?? 0,
+      active: rule.active,
+      ruleId: rule.id,
+    }))
+
+    message.loading({ content: '기존 상품 삭제 중...', key: 'purchasePrice' })
+
+    try {
+      await deleteProductDiscountRules(productId)
+
+      await apiService.deleteProduct(productId)
+
+      let latestProductsAfterDeletion: AdminProductStockRow[]
+      try {
+        latestProductsAfterDeletion = await waitForProductDeletion(productId)
+      } catch (firstDeleteError) {
+        await apiService.deleteProduct(productId)
+        latestProductsAfterDeletion = await waitForProductDeletion(productId, 8, 700)
+      }
+
+      let categoryIdToUse: number | undefined = currentProduct.categoryId
+      if (!categoryIdToUse && currentProduct.categoryCode && serverCategoriesData?.data) {
+        const matchedCategory = serverCategoriesData.data.find((category: AdminCategoryRow) => category.code === currentProduct.categoryCode)
+        if (matchedCategory) {
+          categoryIdToUse = matchedCategory.categoryId
+        }
+      }
+
+      message.loading({ content: '새 상품 생성 중...', key: 'purchasePrice' })
+
+      const recreatedProduct = await apiService.createProduct({
+        name: currentProduct.name,
+        price: currentProduct.price,
+        initialStockQty: currentProduct.stockQty ?? 0,
+        safetyStock: currentProduct.safetyStock ?? 0,
+        purchasePrice: nextPurchasePrice,
+        taxType: currentProduct.taxType,
+        categoryId: categoryIdToUse,
+      })
+
+      const newProductId = recreatedProduct.data?.productId
+      if (!newProductId) {
+        throw new Error('재생성된 상품 ID를 찾을 수 없습니다.')
+      }
+
+      for (const rule of existingRules) {
+        if (rule.policyId) {
+          await apiService.createDiscountRule({
+            policyId: rule.policyId,
+            label: rule.label || '',
+            type: rule.type as any,
+            targetProductId: newProductId,
+            applyScope: rule.applyScope as any,
+            discountRate: rule.discountRate,
+            amountOff: rule.amountOff,
+            minAmount: rule.minAmount,
+            minQty: rule.minQty,
+            active: rule.active,
+          })
+        }
+      }
+
+      if (currentProduct.sortOrder !== undefined) {
+        const reorderItems = latestProductsAfterDeletion
+          .filter(product => product.productId !== productId && !product.deletedAt && product.active !== false)
+          .concat([{ ...currentProduct, productId: newProductId, purchasePrice: nextPurchasePrice, deletedAt: undefined }])
+          .sort((a, b) => {
+            const aOrder = a.productId === newProductId ? currentProduct.sortOrder! : (a.sortOrder ?? 999)
+            const bOrder = b.productId === newProductId ? currentProduct.sortOrder! : (b.sortOrder ?? 999)
+            return aOrder - bOrder
+          })
+          .map((product, index) => ({
+            productId: product.productId,
+            sortOrder: index + 1,
+          }))
+
+        await apiService.reorderProducts({ items: reorderItems })
+      }
+
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['discountPolicies'] }),
+        queryClient.invalidateQueries({ queryKey: ['products'] }),
+      ])
+      await Promise.all([
+        refetchDiscountPolicies(),
+        refetch(),
+      ])
+
+      message.success({ content: '매입가가 수정되었습니다.', key: 'purchasePrice' })
+      setEditingCell(null)
+      setEditingValue('')
+    } catch (error: any) {
+      console.error('[ProductList] 매입가 수정 실패:', error)
+      message.error({
+        content: error.response?.data?.message || '매입가 수정에 실패했습니다.',
+        key: 'purchasePrice',
+      })
+    }
+  }
+
+  // 셀 편집 저장
+  const handleCellSave = async (productId: number, field: string) => {
+    const saveKey = `${productId}:${field}`
+    if (savingCellKeysRef.current.has(saveKey)) {
+      return
+    }
+
+    savingCellKeysRef.current.add(saveKey)
+    console.log('[handleCellSave] 호출됨:', { productId, field, editingValue })
+
+    try {
+      const product = activeProducts.find(p => p.productId === productId)
+      if (!product) {
+        console.log('[handleCellSave] 상품을 찾을 수 없음:', productId)
+        return
+      }
+
+      const numValue = Number(editingValue)
+      console.log('[handleCellSave] numValue:', numValue)
+
+      if (field === 'purchasePrice') {
+        if (isNaN(numValue) || numValue < 0) {
+          message.error('올바른 매입가를 입력해주세요.')
+          return
+        }
+        await handlePurchasePriceUpdate(productId, numValue)
+        return
+      }
+
+      if (field === 'bankTransferPrice') {
       // 무통장 할인 금액 저장 로직 (입력값 = 할인 금액)
       if (isNaN(numValue) || numValue < 0) {
         message.error('올바른 할인 금액을 입력해주세요.')
@@ -1163,12 +1388,12 @@ const ProductList = () => {
         console.log('[ProductList] 무통장 할인 룰 생성:', JSON.stringify(newRuleData, null, 2));
         createDiscountRuleMutation.mutate(newRuleData)
       }
-      setEditingCell(null)
-      setEditingValue('')
-      return
-    }
+        setEditingCell(null)
+        setEditingValue('')
+        return
+      }
 
-    if (field === 'pickupDiscountPrice') {
+      if (field === 'pickupDiscountPrice') {
       // 픽업 할인 금액 저장 로직 (입력값 = 할인 금액)
       if (isNaN(numValue) || numValue < 0) {
         message.error('올바른 할인 금액을 입력해주세요.')
@@ -1226,13 +1451,13 @@ const ProductList = () => {
         console.log('[ProductList] 픽업 할인 룰 생성:', JSON.stringify(newRuleData, null, 2));
         createDiscountRuleMutation.mutate(newRuleData)
       }
-      setEditingCell(null)
-      setEditingValue('')
-      return
-    }
+        setEditingCell(null)
+        setEditingValue('')
+        return
+      }
 
-    // 상품 정보 수정 로직 (API 기반)
-    if (field === 'price' || field === 'purchasePrice' || field === 'category' || field === 'taxType') {
+      // 상품 정보 수정 로직 (API 기반)
+      if (field === 'price' || field === 'category' || field === 'taxType') {
       const updateData: any = {}
 
       switch (field) {
@@ -1242,13 +1467,6 @@ const ProductList = () => {
             return
           }
           updateData.price = numValue
-          break
-        case 'purchasePrice':
-          if (isNaN(numValue) || numValue < 0) {
-            message.error('올바른 매입가를 입력해주세요.')
-            return
-          }
-          updateData.purchasePrice = numValue
           break
         case 'category':
           console.log('[DEBUG] 카테고리 수정 시작:', { productId, field, editingValue, currentCategoryCode: product.categoryCode })
@@ -1283,11 +1501,11 @@ const ProductList = () => {
         console.error('[ProductList] 에러 메시지:', error.message)
         message.error(error.response?.data?.message || '상품 수정에 실패했습니다.')
       })
-      return
-    }
+        return
+      }
 
-    // 재고/안전재고 수정 로직 (별도 API 사용)
-    if (field === 'stockQty' || field === 'safetyStock') {
+      // 재고/안전재고 수정 로직 (별도 API 사용)
+      if (field === 'stockQty' || field === 'safetyStock') {
       if (isNaN(numValue) || numValue < 0) {
         message.error(`올바른 ${field === 'stockQty' ? '재고 수량' : '안전재고'}을 입력해주세요.`)
         return
@@ -1308,7 +1526,10 @@ const ProductList = () => {
       }).catch((error: any) => {
         message.error(error.response?.data?.message || '재고 수정에 실패했습니다.')
       })
-      return
+        return
+      }
+    } finally {
+      savingCellKeysRef.current.delete(saveKey)
     }
   }
 
@@ -1399,6 +1620,7 @@ const ProductList = () => {
             value={Number(editingValue)}
             onChange={(val) => setEditingValue(String(val ?? 0))}
             onPressEnter={onSave}
+            onBlur={onSave}
             autoFocus
             size="small"
             style={{ width: 120 }}
@@ -1455,8 +1677,8 @@ const ProductList = () => {
         />
       ),
       key: 'checkbox',
-      width: 50,
-      fixed: 'left' as const,
+      width: isMobileProductTable ? 42 : 50,
+      fixed: isCompactProductTable ? undefined : 'left' as const,
       render: (_: any, record: AdminProductStockRow) => (
         <Checkbox
           checked={selectedProductIds.includes(record.productId)}
@@ -1474,15 +1696,36 @@ const ProductList = () => {
       title: '상품 ID',
       dataIndex: 'productId',
       key: 'productId',
-      width: 100,
-      fixed: 'left' as const,
+      width: 80,
+      fixed: isCompactProductTable ? undefined : 'left' as const,
     },
     {
       title: '상품명',
       dataIndex: 'name',
       key: 'name',
-      width: 200,
-      fixed: 'left' as const,
+      width: isMobileProductTable ? 170 : 200,
+      fixed: isCompactProductTable ? undefined : 'left' as const,
+      render: (value: string, record: AdminProductStockRow) => (
+        <Space direction="vertical" size={2} style={{ width: '100%' }}>
+          <Typography.Text style={{ wordBreak: 'break-word', whiteSpace: 'normal' }}>
+            {value}
+          </Typography.Text>
+          {isCompactProductTable && (
+            <Space size={4} wrap>
+              {(record.categoryName || record.categoryCode || record.category) && (
+                <Tag color="blue" style={{ marginInlineEnd: 0 }}>
+                  {record.categoryName || getCategoryInfo(record.categoryCode || record.category, categories)?.label || record.categoryCode || record.category}
+                </Tag>
+              )}
+              {!isMobileProductTable && record.taxType && (
+                <Tag color={record.taxType === 'TAX_EXEMPT' ? 'green' : 'orange'} style={{ marginInlineEnd: 0 }}>
+                  {getTaxTypeLabel(record.taxType)}
+                </Tag>
+              )}
+            </Space>
+          )}
+        </Space>
+      ),
     },
     {
       title: (
@@ -1495,7 +1738,7 @@ const ProductList = () => {
       ),
       dataIndex: 'categoryCode',
       key: 'category',
-      width: 140,
+      width: 110,
       render: (_value: string | undefined, record: AdminProductStockRow) => {
         const isEditing = editingCell?.productId === record.productId && editingCell?.field === 'category'
         // 서버에서 받은 categoryName 또는 categoryCode 표시
@@ -1529,7 +1772,7 @@ const ProductList = () => {
       ),
       dataIndex: 'taxType',
       key: 'taxType',
-      width: 120,
+      width: 96,
       render: (_value: string | undefined, record: AdminProductStockRow) => {
         const isEditing = editingCell?.productId === record.productId && editingCell?.field === 'taxType'
         return renderEditableCell(
@@ -1558,7 +1801,7 @@ const ProductList = () => {
       ),
       dataIndex: 'purchasePrice',
       key: 'purchasePrice',
-      width: 140,
+      width: isMobileProductTable ? 112 : 124,
       render: (_value: number | undefined, record: AdminProductStockRow) => {
         const isEditing = editingCell?.productId === record.productId && editingCell?.field === 'purchasePrice'
         return renderEditableCell(
@@ -1583,7 +1826,7 @@ const ProductList = () => {
       ),
       dataIndex: 'price',
       key: 'price',
-      width: 140,
+      width: isMobileProductTable ? 112 : 124,
       render: (_value: number, record: AdminProductStockRow) => {
         const isEditing = editingCell?.productId === record.productId && editingCell?.field === 'price'
         return renderEditableCell(
@@ -1607,7 +1850,7 @@ const ProductList = () => {
         </Space>
       ),
       key: 'bankTransferPrice',
-      width: 120,
+      width: 104,
       render: (_: any, record: AdminProductStockRow) => {
         const bankTransferPrice = getBankTransferPrice(record) || record.price
         const discountAmount = record.price - bankTransferPrice
@@ -1638,7 +1881,7 @@ const ProductList = () => {
     {
       title: '수량할인',
       key: 'qtyDiscount',
-      width: 150,
+      width: 116,
       render: (_: any, record: AdminProductStockRow) => {
         const qtyDiscount = getQtyDiscount(record)
         if (qtyDiscount) {
@@ -1667,7 +1910,7 @@ const ProductList = () => {
         </Space>
       ),
       key: 'pickupDiscountPrice',
-      width: 120,
+      width: 104,
       render: (_: any, record: AdminProductStockRow) => {
         const pickupDiscount = getPickupDiscountPrice(record)
         const pickupPrice = pickupDiscount ? pickupDiscount.discountedPrice : record.price
@@ -1700,7 +1943,7 @@ const ProductList = () => {
       title: '재고',
       dataIndex: 'stockQty',
       key: 'stockQty',
-      width: 100,
+      width: isMobileProductTable ? 72 : 84,
       render: (value: number, record: AdminProductStockRow) => {
         const isEditing = editingCell?.productId === record.productId && editingCell?.field === 'stockQty'
         
@@ -1733,7 +1976,7 @@ const ProductList = () => {
       title: '전시상태',
       dataIndex: 'active',
       key: 'active',
-      width: 100,
+      width: 84,
       render: (active: boolean) => (
         <Tag color={active !== false ? 'green' : 'red'}>
           {active !== false ? '전시중' : '숨김'}
@@ -1745,7 +1988,7 @@ const ProductList = () => {
       title: '안전재고',
       dataIndex: 'safetyStock',
       key: 'safetyStock',
-      width: 100,
+      width: 84,
       render: (value: number, record: AdminProductStockRow) => {
         const isEditing = editingCell?.productId === record.productId && editingCell?.field === 'safetyStock'
         return renderEditableCell(
@@ -1763,7 +2006,7 @@ const ProductList = () => {
       title: '전시',
       dataIndex: 'active',
       key: 'display',
-      width: 100,
+      width: 84,
       render: (_value: boolean | undefined, record: AdminProductStockRow) => {
         const isActive = record.active !== false
         return (
@@ -1783,9 +2026,9 @@ const ProductList = () => {
     {
       title: '작업',
       key: 'actions',
-      width: 150,
+      width: isMobileProductTable ? 92 : 120,
       render: (_: any, record: AdminProductStockRow) => (
-        <Space>
+        <Space size={4} direction={isMobileProductTable ? 'vertical' : 'horizontal'}>
           <Button
             type="link"
             size="small"
@@ -1813,6 +2056,11 @@ const ProductList = () => {
     return products.filter(p => !p.deletedAt)
   }, [products])
 
+  const isCompactProductTable = !screens.xl
+  const isMobileProductTable = !screens.md
+  const productCardBodyStyle = screens.md ? undefined : { padding: 8 }
+  const topToolbarButtonStyle = screens.md ? undefined : { width: '100%' }
+
   // 카테고리별 상품 필터링 + 전시순서(sortOrder) 정렬 (테이블·모달 공통)
   const filteredProducts = useMemo(() => {
     const list = selectedCategoryFilter === 'ALL'
@@ -1822,6 +2070,17 @@ const ProductList = () => {
   }, [activeProducts, selectedCategoryFilter])
 
   // 카테고리별 통계 (서버 카테고리 기반, 활성 상품만)
+  const tableColumns = (() => {
+    const columns = getColumns()
+    if (!isCompactProductTable) return columns
+
+    const visibleKeys = isMobileProductTable
+      ? ['checkbox', 'name', 'purchasePrice', 'price', 'stockQty', 'actions']
+      : ['checkbox', 'productId', 'name', 'purchasePrice', 'price', 'stockQty', 'active', 'actions']
+
+    return columns.filter(column => visibleKeys.includes(String(column.key)))
+  })()
+
   const serverCategoryStats = useMemo(() => {
     const stats: Record<string, { count: number; totalStock: number }> = {}
     const serverCategories = serverCategoriesData?.data || []
@@ -1852,7 +2111,7 @@ const ProductList = () => {
     <div>
       <div style={{ marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
         <Title level={2} style={{ margin: 0 }}>판매 상품 관리</Title>
-        <Space wrap>
+        <Space wrap direction={screens.md ? 'horizontal' : 'vertical'} style={screens.md ? undefined : { width: '100%' }}>
           <Button 
             icon={<ReloadOutlined spin={isRefreshing} />} 
             onClick={async () => {
@@ -1876,6 +2135,7 @@ const ProductList = () => {
             style={{ 
               minWidth: 110,
               transition: 'all 0.3s',
+              ...topToolbarButtonStyle,
               ...(isRefreshing ? { backgroundColor: '#52c41a', borderColor: '#52c41a' } : {})
             }}
           >
@@ -1884,16 +2144,18 @@ const ProductList = () => {
           <Button 
             icon={<GiftOutlined />} 
             onClick={() => setIsCategoryManagementOpen(true)}
+            style={topToolbarButtonStyle}
           >
             카테고리 관리
           </Button>
           <Button 
             icon={<OrderedListOutlined />} 
             onClick={handleOpenReorderModal}
+            style={topToolbarButtonStyle}
           >
             전시 순서 변경
           </Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={handleAddProduct}>
+          <Button type="primary" icon={<PlusOutlined />} onClick={handleAddProduct} style={topToolbarButtonStyle}>
             상품 등록
           </Button>
         </Space>
@@ -2310,13 +2572,13 @@ WHERE category IS NULL OR tax_type IS NULL;`}
           </Space>
         </Card>
       )}
-      <Card>
+      <Card styles={{ body: productCardBodyStyle }}>
         {selectedProductIds.length > 0 && (
-          <div style={{ marginBottom: 16, padding: '12px 16px', backgroundColor: '#f0f5ff', borderRadius: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ marginBottom: 12, padding: screens.md ? '12px 16px' : '10px 12px', backgroundColor: '#f0f5ff', borderRadius: 8, display: 'flex', justifyContent: 'space-between', alignItems: screens.md ? 'center' : 'flex-start', flexWrap: 'wrap', gap: 8 }}>
             <Typography.Text strong>
               {selectedProductIds.length}개 상품 선택됨
             </Typography.Text>
-            <Space>
+            <Space wrap direction={screens.md ? 'horizontal' : 'vertical'} style={screens.md ? undefined : { width: '100%' }}>
               <Button
                 type="primary"
                 onClick={() => {
@@ -2358,14 +2620,15 @@ WHERE category IS NULL OR tax_type IS NULL;`}
             </Space>
           </div>
         )}
-        <div style={{ overflowX: 'auto' }}>
+        <div style={{ overflowX: isCompactProductTable ? 'hidden' : 'auto' }}>
           <Table
-            columns={getColumns()}
+            columns={tableColumns}
             dataSource={filteredProducts}
             rowKey="productId"
             loading={isLoading}
             pagination={{ pageSize: 20 }}
-            scroll={{ x: 'max-content' }}
+            size={isCompactProductTable ? 'small' : 'middle'}
+            scroll={isCompactProductTable ? undefined : { x: 'max-content' }}
             locale={{
               emptyText: isLoading 
                 ? '상품 데이터를 불러오는 중...' 

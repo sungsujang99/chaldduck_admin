@@ -2,17 +2,10 @@ import { useState, useEffect } from 'react'
 import { Layout as AntLayout, Menu, theme, Button, Dropdown, Avatar } from 'antd'
 import { useNavigate, useLocation } from 'react-router-dom'
 import {
-  DashboardOutlined,
   UserOutlined,
-  ShoppingCartOutlined,
-  ShopOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
-  SettingOutlined,
   LogoutOutlined,
-  NotificationOutlined,
-  MessageOutlined,
-  FileProtectOutlined,
 } from '@ant-design/icons'
 import type { MenuProps } from 'antd'
 
@@ -31,6 +24,8 @@ const Layout = ({ children, onLogout }: LayoutProps) => {
   const {
     token: { colorBgContainer, borderRadiusLG },
   } = theme.useToken()
+  const isDesktopCompressed = !isMobile && collapsed
+  const siderWidth = isMobile ? 250 : isDesktopCompressed ? 150 : 250
 
   // 모바일 감지 및 사이드바 자동 접기
   useEffect(() => {
@@ -60,42 +55,34 @@ const Layout = ({ children, onLogout }: LayoutProps) => {
   const menuItems: MenuProps['items'] = [
     {
       key: '/',
-      icon: <DashboardOutlined />,
       label: '대시보드',
     },
     {
       key: '/products',
-      icon: <ShopOutlined />,
       label: '판매 관리',
     },
     {
       key: '/customers',
-      icon: <UserOutlined />,
       label: '고객 관리',
     },
     {
       key: '/orders',
-      icon: <ShoppingCartOutlined />,
       label: '주문 관리',
     },
     {
       key: '/cash-receipts',
-      icon: <FileProtectOutlined />,
       label: '현금영수증',
     },
     {
       key: '/policies',
-      icon: <SettingOutlined />,
       label: '정책 관리',
     },
     {
       key: '/notices',
-      icon: <NotificationOutlined />,
       label: '공지사항',
     },
     {
       key: '/notifications',
-      icon: <MessageOutlined />,
       label: '알림 로그',
     },
   ]
@@ -118,10 +105,10 @@ const Layout = ({ children, onLogout }: LayoutProps) => {
       <Sider
         trigger={null}
         collapsible
-        collapsed={collapsed}
-        width={250}
+        collapsed={isMobile ? collapsed : false}
+        width={siderWidth}
         breakpoint="lg"
-        collapsedWidth={isMobile ? 0 : 80}
+        collapsedWidth={0}
         style={{
           overflow: 'auto',
           height: '100vh',
@@ -140,12 +127,14 @@ const Layout = ({ children, onLogout }: LayoutProps) => {
             alignItems: 'center',
             justifyContent: 'center',
             color: '#fff',
-            fontSize: collapsed ? 16 : 20,
+            fontSize: isDesktopCompressed ? 16 : 20,
             fontWeight: 'bold',
             borderBottom: '1px solid #303030',
+            padding: '0 12px',
+            textAlign: 'center',
           }}
         >
-          {collapsed ? 'C' : 'Chaldduck Admin'}
+          {isMobile && collapsed ? '' : isDesktopCompressed ? 'Chaldduck' : 'Chaldduck Admin'}
         </div>
         <Menu
           theme="dark"
