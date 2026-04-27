@@ -891,11 +891,16 @@ const ProductList = () => {
       if (values.name && values.name !== editingProduct.name) {
         updateData.name = values.name
       }
-      if (values.price !== undefined && values.price !== editingProduct.price) {
-        updateData.price = values.price
+      const nextPrice = values.price !== undefined ? Number(values.price) : undefined
+      const nextPurchasePrice = values.purchasePrice !== undefined && values.purchasePrice !== null
+        ? Number(values.purchasePrice)
+        : undefined
+
+      if (nextPrice !== undefined && nextPrice !== editingProduct.price) {
+        updateData.price = nextPrice
       }
-      if (values.purchasePrice !== undefined && values.purchasePrice !== editingProduct.purchasePrice) {
-        updateData.purchasePrice = values.purchasePrice
+      if (nextPurchasePrice !== undefined && nextPurchasePrice !== (editingProduct.purchasePrice ?? undefined)) {
+        updateData.purchasePrice = nextPurchasePrice
       }
       if (values.categoryId !== undefined && values.categoryId !== editingProduct.categoryId) {
         updateData.categoryId = values.categoryId
@@ -1243,149 +1248,8 @@ const ProductList = () => {
             message.error('올바른 매입가를 입력해주세요.')
             return
           }
-          // 서버 API가 purchasePrice 수정을 지원하지 않아서 삭제 후 재생성
-          {
-            const currentProduct = products?.find(p => p.productId === productId)
-            if (!currentProduct) {
-              message.error('상품을 찾을 수 없습니다.')
-              return
-            }
-            
-            // 같은 값이면 수정하지 않음
-            if (currentProduct.purchasePrice === numValue) {
-              setEditingCell(null)
-              setEditingValue('')
-              return
-            }
-            
-            // 해당 상품에 연결된 할인 룰 가져오기
-            const productDiscountRules = getProductDiscounts[productId] || []
-            
-            // 기존 sortOrder 저장 (순서 유지용)
-            const originalSortOrder = currentProduct.sortOrder
-            
-            // 바로 실행 (확인 없이)
-            ;(async () => {
-              try {
-                message.loading({ content: '매입가 수정 중...', key: 'purchasePrice' })
-                
-                // 1. 기존 할인 룰 정보 저장 (삭제 전에)
-                const existingRules = productDiscountRules.map(rule => ({
-                  policyId: discountPoliciesData?.data?.find(p => p.rules?.some(r => r.id === rule.id))?.id,
-                  label: rule.label,
-                  type: rule.type,
-                  applyScope: rule.applyScope,
-                  discountRate: rule.discountRate ?? 0,
-                  amountOff: rule.amountOff ?? 0,
-                  minAmount: rule.minAmount ?? 0,
-                  minQty: rule.minQty ?? 0,
-                  active: rule.active,
-                  ruleId: rule.id,
-                }))
-                
-                // 2. 기존 할인 룰 삭제
-                for (const rule of existingRules) {
-                  if (rule.ruleId) {
-                    await apiService.deleteDiscountRule(rule.ruleId)
-                  }
-                }
-                
-                // 3. 기존 상품 삭제
-                await apiService.deleteProduct(productId)
-                
-                // 4. 새 상품 생성 (purchasePrice만 수정)
-                // categoryId 찾기: 상품의 categoryCode로 카테고리 목록에서 매칭
-                let categoryIdToUse: number | undefined = currentProduct.categoryId
-                if (!categoryIdToUse && currentProduct.categoryCode && serverCategoriesData?.data) {
-                  const matchedCategory = serverCategoriesData.data.find(
-                    (cat: any) => cat.code === currentProduct.categoryCode
-                  )
-                  if (matchedCategory) {
-                    categoryIdToUse = matchedCategory.categoryId
-                  }
-                }
-                
-                const newProductData: ProductCreateRequest = {
-                  name: currentProduct.name,
-                  price: currentProduct.price,
-                  initialStockQty: currentProduct.stockQty ?? 0,
-                  safetyStock: currentProduct.safetyStock ?? 0,
-                  purchasePrice: numValue,
-                  taxType: currentProduct.taxType as any,
-                  categoryId: categoryIdToUse,
-                }
-                
-                console.log('[ProductList] 새 상품 생성 데이터:', JSON.stringify(newProductData, null, 2))
-                
-                const newProductResponse = await apiService.createProduct(newProductData)
-                console.log('[ProductList] 새 상품 생성 응답:', newProductResponse)
-                const newProductId = newProductResponse.data?.productId
-                
-                if (!newProductId) {
-                  throw new Error('새 상품 생성에 실패했습니다. (productId 없음)')
-                }
-                
-                // 5. 할인 룰 재생성 (새 productId로)
-                if (newProductId && existingRules.length > 0) {
-                  for (const rule of existingRules) {
-                    if (rule.policyId) {
-                      const newRuleData: DiscountRuleCreateRequest = {
-                        policyId: rule.policyId,
-                        label: rule.label || '',
-                        type: rule.type as any,
-                        targetProductId: newProductId,
-                        applyScope: rule.applyScope as any,
-                        discountRate: rule.discountRate,
-                        amountOff: rule.amountOff,
-                        minAmount: rule.minAmount,
-                        minQty: rule.minQty,
-                        active: rule.active,
-                      }
-                      await apiService.createDiscountRule(newRuleData)
-                    }
-                  }
-                }
-                
-                // 6. sortOrder 복원 - 전체 상품 목록 다시 가져와서 순서 재설정
-                if (newProductId && originalSortOrder !== undefined) {
-                  const productsResponse = await apiService.getProducts()
-                  const allProducts = productsResponse.data || []
-                  
-                  // 기존 순서대로 정렬 (새 상품은 원래 위치에 삽입)
-                  const sortedProducts = allProducts
-                    .filter(p => p.active !== false)
-                    .sort((a, b) => {
-                      const aOrder = a.productId === newProductId ? originalSortOrder : (a.sortOrder ?? 999)
-                      const bOrder = b.productId === newProductId ? originalSortOrder : (b.sortOrder ?? 999)
-                      return aOrder - bOrder
-                    })
-                  
-                  // reorderProducts API 호출
-                  const reorderItems = sortedProducts.map((p, index) => ({
-                    productId: p.productId,
-                    sortOrder: index + 1,
-                  }))
-                  
-                  await apiService.reorderProducts({ items: reorderItems })
-                }
-                
-                message.success({ content: '매입가가 수정되었습니다.', key: 'purchasePrice' })
-                setEditingCell(null)
-                setEditingValue('')
-                queryClient.invalidateQueries({ queryKey: ['products'] })
-                queryClient.invalidateQueries({ queryKey: ['discountPolicies'] })
-                refetch()
-                refetchDiscountPolicies()
-              } catch (error: any) {
-                console.error('[ProductList] 매입가 수정 실패:', error)
-                message.error({ 
-                  content: error.response?.data?.message || '매입가 수정에 실패했습니다.', 
-                  key: 'purchasePrice' 
-                })
-              }
-            })()
-          }
-          return
+          updateData.purchasePrice = numValue
+          break
         case 'category':
           console.log('[DEBUG] 카테고리 수정 시작:', { productId, field, editingValue, currentCategoryCode: product.categoryCode })
           updateData.categoryId = Number(editingValue)

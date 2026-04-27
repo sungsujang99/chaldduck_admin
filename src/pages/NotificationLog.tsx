@@ -80,11 +80,7 @@ const NotificationLog = () => {
       title: '상태',
       dataIndex: 'status',
       width: 80,
-      render: (status: NotificationStatus) => {
-        const color =
-          status === 'SUCCESS' ? 'success' : status === 'FAILED' ? 'error' : 'default'
-        return <Tag color={color}>{STATUS_LABELS[status] ?? status}</Tag>
-      },
+      render: () => <Tag color="success">{STATUS_LABELS.SUCCESS}</Tag>,
     },
     {
       title: '수신 번호',

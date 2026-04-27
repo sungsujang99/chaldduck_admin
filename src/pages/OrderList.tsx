@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Card, Table, Space, Typography, Tag, Button, Select, Row, Col, Modal, message, Input, Form, Tabs, DatePicker, Upload } from 'antd'
+import { Card, Table, Space, Typography, Tag, Button, Select, Row, Col, Modal, message, Input, Form, Tabs, DatePicker, Upload, Grid } from 'antd'
 import { ReloadOutlined, EditOutlined, DownloadOutlined, UploadOutlined } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import * as XLSX from 'xlsx'
@@ -46,6 +46,7 @@ const ResizableTitle = (props: any) => {
 const OrderList = () => {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const screens = Grid.useBreakpoint()
   const [searchParams] = useSearchParams()
   const [deliveryTypeFilter, setDeliveryTypeFilter] = useState<FulfillmentType | 'ALL'>('ALL')
   const [paymentMethodFilter, setPaymentMethodFilter] = useState<PaymentMethod | 'ALL'>('ALL')
@@ -127,6 +128,19 @@ const OrderList = () => {
   }
 
   const statusFilter = getStatusFilter(activeTab)
+
+  const getEffectiveFulfillmentType = (order: OrderResponse): FulfillmentType | undefined => {
+    if (order.fulfillmentType) return order.fulfillmentType
+    if (order.address1 || order.zipCode) return 'DELIVERY'
+    return undefined
+  }
+
+  const isDeliveryReadyOrder = (order: OrderResponse) => {
+    const fulfillmentType = getEffectiveFulfillmentType(order)
+    const paidOrConfirmed = order.status === 'PAID' || order.status === 'CONFIRMED'
+    const readyOrPendingInit = order.deliveryStatus === 'READY' || (order.status === 'PAID' && !order.deliveryStatus)
+    return fulfillmentType === 'DELIVERY' && paidOrConfirmed && readyOrPendingInit
+  }
 
   // 주문 리스트 - 불러와지는 대로 표시 (progressive loading)
   const [ordersData, setOrdersData] = useState<{ data: (OrderResponse & { paymentMethod?: PaymentMethod; customerName?: string })[] } | null>(null)
@@ -305,14 +319,12 @@ const OrderList = () => {
         }
       } else if (statusFilter === 'PICKUP_WAITING') {
         // 픽업대기: PICKUP이면서 PAID 상태 (결제완료 후 바로 픽업대기)
-        if (order.fulfillmentType !== 'PICKUP' || order.status !== 'PAID') {
+        if (getEffectiveFulfillmentType(order) !== 'PICKUP' || order.status !== 'PAID') {
           return false
         }
       } else if (statusFilter === 'DELIVERY_READY') {
         // 배송준비: DELIVERY이면서 (CONFIRMED 또는 PAID) 상태이고 deliveryStatus가 READY
-        if (order.fulfillmentType !== 'DELIVERY' || 
-            (order.status !== 'CONFIRMED' && order.status !== 'PAID') || 
-            order.deliveryStatus !== 'READY') {
+        if (!isDeliveryReadyOrder(order)) {
           return false
         }
       } else if (statusFilter !== 'ALL' && order.status !== statusFilter) {
@@ -321,7 +333,7 @@ const OrderList = () => {
       
       // 배송 방식 필터
       if (deliveryTypeFilter !== 'ALL') {
-        if (!order.fulfillmentType || order.fulfillmentType !== deliveryTypeFilter) {
+        if (getEffectiveFulfillmentType(order) !== deliveryTypeFilter) {
           return false
         }
       }
@@ -382,9 +394,9 @@ const OrderList = () => {
     return {
       total: dateFilteredOrders.length,
       waitingPayment: dateFilteredOrders.filter((o) => o.status === 'CREATED').length,
-      newOrder: dateFilteredOrders.filter((o) => o.fulfillmentType === 'DELIVERY' && o.status === 'PAID').length,
-      pickupWaiting: dateFilteredOrders.filter((o) => o.fulfillmentType === 'PICKUP' && o.status === 'PAID').length,
-      deliveryReady: dateFilteredOrders.filter((o) => o.fulfillmentType === 'DELIVERY' && (o.status === 'CONFIRMED' || o.status === 'PAID') && o.deliveryStatus === 'READY').length,
+      newOrder: dateFilteredOrders.filter((o) => getEffectiveFulfillmentType(o) === 'DELIVERY' && o.status === 'PAID').length,
+      pickupWaiting: dateFilteredOrders.filter((o) => getEffectiveFulfillmentType(o) === 'PICKUP' && o.status === 'PAID').length,
+      deliveryReady: dateFilteredOrders.filter(isDeliveryReadyOrder).length,
       delivering: dateFilteredOrders.filter((o) => o.deliveryStatus === 'DELIVERING').length,
       completed: dateFilteredOrders.filter((o) => o.status === 'COMPLETED').length,
       canceled: dateFilteredOrders.filter((o) => o.status === 'CANCELED').length,
@@ -1320,6 +1332,7 @@ const OrderList = () => {
     {
       title: 'ID',
       key: 'orderId',
+      responsive: ['md' as const],
       width: columnWidths.orderId,
       fixed: 'left' as const,
       onHeaderCell: () => ({
@@ -1341,6 +1354,7 @@ const OrderList = () => {
     {
       title: '주문번호',
       key: 'orderNo',
+      responsive: ['md' as const],
       width: columnWidths.orderNo,
       fixed: 'left' as const,
       onHeaderCell: () => ({
@@ -1382,6 +1396,7 @@ const OrderList = () => {
     {
       title: '주문자',
       key: 'customer',
+      responsive: ['md' as const],
       width: columnWidths.customer,
       fixed: 'left' as const,
       onHeaderCell: () => ({
@@ -1398,9 +1413,60 @@ const OrderList = () => {
       ),
     },
     {
+      title: '주문 정보',
+      key: 'mobileOrderSummary',
+      responsive: ['xs' as const, 'sm' as const],
+      render: (_: any, record: OrderResponse) => {
+        const addressLine1 = record.fulfillmentType === 'DELIVERY'
+          ? [record.zipCode ? `[${record.zipCode}]` : '', record.address1].filter(Boolean).join(' ')
+          : '-'
+        const addressLine2 = record.fulfillmentType === 'DELIVERY'
+          ? record.address2 || record.address3 || ''
+          : ''
+
+        return (
+          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+            <Space direction="vertical" size={0}>
+              <Typography.Text style={{ fontSize: 12 }}>{record.recipientName || '-'}</Typography.Text>
+              <Typography.Text type="secondary" style={{ fontSize: 10 }}>
+                {formatPhoneNumber(record.recipientPhone)}
+              </Typography.Text>
+            </Space>
+            <Space direction="vertical" size={2} style={{ width: '100%' }}>
+              {record.items && record.items.length > 0 ? (
+                record.items.map((item, idx) => (
+                  <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, flexWrap: 'wrap' }}>
+                    <Typography.Text style={{ wordBreak: 'break-word', whiteSpace: 'normal' }}>
+                      {item.productName}
+                    </Typography.Text>
+                    <Typography.Text type="secondary" style={{ marginLeft: 8, flexShrink: 0 }}>
+                      x{item.quantity}
+                    </Typography.Text>
+                  </div>
+                ))
+              ) : (
+                <Typography.Text type="secondary">-</Typography.Text>
+              )}
+            </Space>
+            <Space direction="vertical" size={0} style={{ width: '100%' }}>
+              <Typography.Text type="secondary" style={{ fontSize: 11, wordBreak: 'break-word', whiteSpace: 'normal' }}>
+                {addressLine1}
+              </Typography.Text>
+              {addressLine2 ? (
+                <Typography.Text type="secondary" style={{ fontSize: 11, wordBreak: 'break-word', whiteSpace: 'normal' }}>
+                  {addressLine2}
+                </Typography.Text>
+              ) : null}
+            </Space>
+          </Space>
+        )
+      },
+    },
+    {
       title: '상태',
       dataIndex: 'status',
       key: 'status',
+      responsive: ['md' as const],
       width: columnWidths.status,
       fixed: 'left' as const,
       onHeaderCell: () => ({
@@ -1414,6 +1480,7 @@ const OrderList = () => {
     {
       title: '처리',
       key: 'actions',
+      responsive: ['md' as const],
       width: columnWidths.actions,
       fixed: 'left' as const,
       onHeaderCell: () => ({
@@ -1457,6 +1524,7 @@ const OrderList = () => {
     {
       title: '결제 방식',
       key: 'payment',
+      responsive: ['md' as const],
       width: columnWidths.payment,
       fixed: 'left' as const,
       onHeaderCell: () => ({
@@ -1482,6 +1550,7 @@ const OrderList = () => {
       title: '현금영수증',
       dataIndex: 'cashReceipt',
       key: 'cashReceipt',
+      responsive: ['md' as const],
       width: columnWidths.cashReceipt,
       fixed: 'left' as const,
       onHeaderCell: () => ({
@@ -1519,6 +1588,7 @@ const OrderList = () => {
     {
       title: '상품',
       key: 'items',
+      responsive: ['md' as const],
       width: columnWidths.items,
       fixed: 'left' as const,
       onHeaderCell: () => ({
@@ -1549,6 +1619,7 @@ const OrderList = () => {
       title: '배송 방식',
       dataIndex: 'fulfillmentType',
       key: 'fulfillmentType',
+      responsive: ['md' as const],
       width: columnWidths.fulfillmentType,
       fixed: 'left' as const,
       onHeaderCell: () => ({
@@ -1567,6 +1638,7 @@ const OrderList = () => {
     {
       title: '배송지 주소',
       key: 'address',
+      responsive: ['md' as const],
       width: columnWidths.address,
       onHeaderCell: () => ({
         width: columnWidths.address,
@@ -1597,6 +1669,7 @@ const OrderList = () => {
       title: '운송장번호',
       dataIndex: 'trackingNo',
       key: 'trackingNo',
+      responsive: ['md' as const],
       width: columnWidths.trackingNo,
       onHeaderCell: () => ({
         width: columnWidths.trackingNo,
@@ -1637,14 +1710,114 @@ const OrderList = () => {
     },
   ]
 
+  const tableColumns = screens.md
+    ? columns.filter((column) => column.key !== 'mobileOrderSummary')
+    : columns
+
+  const topActionButtonStyle = screens.md ? undefined : { width: '100%' }
+  const topActionButtons = (
+    <Space
+      direction={screens.md ? 'horizontal' : 'vertical'}
+      wrap={screens.md}
+      style={screens.md ? undefined : { width: '100%' }}
+    >
+      <Button
+        icon={<DownloadOutlined />}
+        onClick={handleExportToExcel}
+        disabled={selectedRowKeys.length === 0}
+        type="primary"
+        style={topActionButtonStyle}
+      >
+        선택 엑셀 다운로드 {selectedRowKeys.length > 0 && `(${selectedRowKeys.length}건)`}
+      </Button>
+      <Button
+        icon={<DownloadOutlined />}
+        onClick={handleExportAllToExcel}
+        disabled={filteredOrders.length === 0}
+        type="default"
+        style={topActionButtonStyle}
+      >
+        전체 엑셀 다운로드 ({filteredOrders.length}건)
+      </Button>
+      <Button
+        icon={<UploadOutlined />}
+        onClick={() => setIsTrackingBulkModalOpen(true)}
+        type="default"
+        style={topActionButtonStyle}
+      >
+        운송장 엑셀 일괄등록
+      </Button>
+      {selectedRowKeys.length > 0 && (
+        <>
+          <Button
+            onClick={() => handleBulkStatusChange('paid')}
+            disabled={selectedRowKeys.length === 0}
+            loading={bulkMarkPaidMutation.isPending}
+            style={{ backgroundColor: '#1890ff', color: 'white', borderColor: '#1890ff', ...topActionButtonStyle }}
+          >
+            결제완료 ({selectedRowKeys.length}건)
+          </Button>
+          <Button
+            onClick={() => handleBulkStatusChange('confirm')}
+            disabled={selectedRowKeys.length === 0}
+            loading={bulkConfirmMutation.isPending}
+            style={{ backgroundColor: '#13c2c2', color: 'white', borderColor: '#13c2c2', ...topActionButtonStyle }}
+          >
+            확인 ({selectedRowKeys.length}건)
+          </Button>
+          <Button
+            onClick={() => handleBulkStatusChange('complete')}
+            disabled={selectedRowKeys.length === 0}
+            loading={bulkCompleteMutation.isPending}
+            style={{ backgroundColor: '#52c41a', color: 'white', borderColor: '#52c41a', ...topActionButtonStyle }}
+          >
+            완료 ({selectedRowKeys.length}건)
+          </Button>
+          <Button
+            onClick={() => handleBulkStatusChange('cancel')}
+            disabled={selectedRowKeys.length === 0}
+            loading={bulkCancelMutation.isPending}
+            danger
+            style={topActionButtonStyle}
+          >
+            취소 ({selectedRowKeys.length}건)
+          </Button>
+        </>
+      )}
+      <Button
+        icon={<ReloadOutlined spin={isRefreshing} />}
+        onClick={async () => {
+          setIsRefreshing(true)
+          queryClient.invalidateQueries({ queryKey: ['order'] })
+          queryClient.invalidateQueries({ queryKey: ['paymentByOrder'] })
+          refetch()
+          setTimeout(() => {
+            setIsRefreshing(false)
+            message.success({ content: '새로고침 완료!', duration: 1.5 })
+          }, 300)
+        }}
+        loading={isRefreshing}
+        type="primary"
+        style={{
+          minWidth: screens.md ? 110 : undefined,
+          transition: 'all 0.3s',
+          ...topActionButtonStyle,
+          ...(isRefreshing ? { backgroundColor: '#52c41a', borderColor: '#52c41a' } : {}),
+        }}
+      >
+        {isRefreshing ? '새로고침 중...' : '새로고침'}
+      </Button>
+    </Space>
+  )
+
   return (
     <div>
       {/* 주문 통계 테이블 */}
       <Card 
         title={
-          <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap', width: '100%', maxWidth: '100%' }}>
             <span style={{ fontWeight: 600 }}>전체주문관리</span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', maxWidth: '100%' }}>
               <Tabs
                 activeKey={dateFilterTab}
                 onChange={(key) => {
@@ -1721,7 +1894,7 @@ const OrderList = () => {
                 setSearchText((e.target as HTMLInputElement).value)
                 setCurrentPage(1)
               }}
-              style={{ width: 280 }}
+              style={{ width: screens.md ? 280 : '100%', maxWidth: '100%' }}
               size="small"
             />
           </div>
@@ -1732,7 +1905,7 @@ const OrderList = () => {
             borderBottom: '2px solid #000',
           }
         }}
-        extra={
+        extra={screens.md ? (
           <Space wrap>
             <Button 
               icon={<DownloadOutlined />} 
@@ -1816,8 +1989,13 @@ const OrderList = () => {
               {isRefreshing ? '새로고침 중...' : '새로고침'}
             </Button>
           </Space>
-        }
+        ) : null}
       >
+        {!screens.md && (
+          <div style={{ marginBottom: 16 }}>
+            {topActionButtons}
+          </div>
+        )}
         <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'center' }}>
           <thead>
             <tr style={{ borderBottom: '1px solid #d9d9d9' }}>
@@ -2043,7 +2221,7 @@ const OrderList = () => {
           }}
         >
           <Table
-            columns={columns}
+            columns={tableColumns}
             dataSource={displayedOrders}
             rowKey="orderId"
             loading={isLoading}

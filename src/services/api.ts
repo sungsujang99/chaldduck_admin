@@ -612,7 +612,7 @@ class ApiService {
 
   async updateProduct(
     productId: number,
-    data: { name?: string; price?: number; category?: string; taxType?: string; active?: boolean; purchasePrice?: number }
+    data: { name?: string; price?: number; category?: string; categoryId?: number; taxType?: string; active?: boolean; purchasePrice?: number }
   ): Promise<JsonBody<void>> {
     console.log('[API] ========== updateProduct 시작 ==========');
     console.log('[API] productId:', productId);
